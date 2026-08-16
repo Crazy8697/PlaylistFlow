@@ -1,0 +1,20 @@
+# Secrets — never commit. See .env.example for the shape.
+.env
+
+# Build output
+build/
+dist/
+*.spec
+
+# Virtualenv
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Generated icons (rebuild with makeicon.py)
+assets/icon_*.png
+
+# Scratch
+*.log
