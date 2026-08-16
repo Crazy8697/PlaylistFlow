@@ -1,24 +1,24 @@
-"""Generate the app icon: a wave rolling over, with notes riding the crest.
+"""Generate the app icon: a breaking wave against a sunset.
 
-Drawn with QPainter at several sizes and packed into a single .ico, so Windows
-picks the right one for the taskbar, the title bar and Explorer.
+Drawn at 64x64 and scaled, so it has to stay legible at 16px — which rules out
+fine detail. The shapes are deliberately few and bold: warm sky, deep water,
+one big curl, a white crest, three spray dots.
 """
 
-import math
 import sys
 from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import (QPainter, QColor, QPen, QBrush, QPixmap, QPainterPath,
-                           QLinearGradient, QFont)
+                           QLinearGradient)
 from PySide6.QtCore import Qt, QRectF, QPointF
 
-# Wheel colours from the app, so the icon belongs to the same family.
-DEEP = QColor("#101216")
-WAVE_HI = QColor("#3FA8D9")
-WAVE_LO = QColor("#4A7FD9")
-CREST = QColor("#9B54D9")
-NOTE = QColor("#E9E7E1")
+SKY_HI = QColor("#F0A03A")     # low sun
+SKY_LO = QColor("#D8562F")     # burnt orange near the horizon
+DEEP = QColor("#12325E")       # trough
+MID = QColor("#1E63A8")        # wave body
+LIGHT = QColor("#3FA8D9")      # lit face
+FOAM = QColor("#EAF4FB")
 
 
 def draw(size: int) -> QPixmap:
@@ -26,61 +26,76 @@ def draw(size: int) -> QPixmap:
     pm.fill(Qt.transparent)
     p = QPainter(pm)
     p.setRenderHint(QPainter.Antialiasing, True)
-    s = size / 64.0   # design at 64px, scale from there
+    s = size / 64.0
 
-    # rounded dark tile
+    def P(x, y):
+        return QPointF(x * s, y * s)
+
+    # Rounded tile, clipped so every shape below stops at the corners.
+    tile = QPainterPath()
+    tile.addRoundedRect(QRectF(0, 0, size, size), 12 * s, 12 * s)
+    p.setClipPath(tile)
+
+    # Sky
+    sky = QLinearGradient(0, 0, 0, size)
+    sky.setColorAt(0.0, SKY_HI)
+    sky.setColorAt(1.0, SKY_LO)
+    p.fillRect(QRectF(0, 0, size, size), QBrush(sky))
+
+    # Sun, low and to the right, mostly hidden behind the wave.
     p.setPen(Qt.NoPen)
+    p.setBrush(QColor(255, 226, 160, 210))
+    p.drawEllipse(P(46, 26), 9 * s, 9 * s)
+
+    # Deep water across the bottom.
+    water = QPainterPath()
+    water.moveTo(P(0, 44))
+    water.cubicTo(P(12, 42), P(20, 50), P(32, 50))
+    water.cubicTo(P(44, 50), P(54, 44), P(64, 46))
+    water.lineTo(P(64, 64))
+    water.lineTo(P(0, 64))
+    water.closeSubpath()
     p.setBrush(QBrush(DEEP))
-    p.drawRoundedRect(QRectF(0, 0, size, size), 12 * s, 12 * s)
+    p.drawPath(water)
 
-    # the wave body: a curl that rises left to right and breaks over
-    grad = QLinearGradient(0, size, size, 0)
-    grad.setColorAt(0.0, WAVE_LO)
-    grad.setColorAt(0.7, WAVE_HI)
-    grad.setColorAt(1.0, CREST)
+    # The curl is a very thick stroked spiral rather than an outlined shape.
+    # Filled outlines kept coming out thin enough to read as a hook; a heavy
+    # round-capped stroke gives the water actual mass, and survives being
+    # scaled down to 16px.
+    spiral = QPainterPath()
+    spiral.moveTo(P(4, 50))
+    spiral.cubicTo(P(12, 44), P(16, 30), P(26, 20))     # flank rising
+    spiral.cubicTo(P(36, 10), P(50, 12), P(51, 24))     # over the top
+    spiral.cubicTo(P(52, 33), P(43, 37), P(38, 31))     # curling back down
+    spiral.cubicTo(P(35, 27), P(38, 22), P(42, 24))     # into the tube
 
-    path = QPainterPath()
-    path.moveTo(2 * s, 46 * s)
-    path.cubicTo(16 * s, 46 * s, 18 * s, 22 * s, 34 * s, 22 * s)
-    path.cubicTo(46 * s, 22 * s, 48 * s, 32 * s, 44 * s, 38 * s)
-    path.cubicTo(41 * s, 42 * s, 35 * s, 42 * s, 33 * s, 38 * s)
-    path.cubicTo(38 * s, 40 * s, 41 * s, 34 * s, 38 * s, 31 * s)
-    path.cubicTo(33 * s, 27 * s, 27 * s, 34 * s, 24 * s, 41 * s)
-    path.cubicTo(21 * s, 47 * s, 14 * s, 52 * s, 2 * s, 52 * s)
-    path.closeSubpath()
-    p.setBrush(QBrush(grad))
-    p.drawPath(path)
-
-    # foam line along the trough
-    pen = QPen(QColor(255, 255, 255, 70), max(1.0, 1.6 * s))
+    grad = QLinearGradient(0, size, size * 0.85, 0)
+    grad.setColorAt(0.0, DEEP)
+    grad.setColorAt(0.5, MID)
+    grad.setColorAt(1.0, LIGHT)
+    pen = QPen(QBrush(grad), 13 * s)
     pen.setCapStyle(Qt.RoundCap)
+    pen.setJoinStyle(Qt.RoundJoin)
     p.setPen(pen)
     p.setBrush(Qt.NoBrush)
+    p.drawPath(spiral)
+
+    # Foam riding the outer edge of the same curl, drawn thinner and offset up.
     foam = QPainterPath()
-    foam.moveTo(3 * s, 53 * s)
-    foam.cubicTo(16 * s, 55 * s, 26 * s, 49 * s, 32 * s, 41 * s)
+    foam.moveTo(P(6, 44))
+    foam.cubicTo(P(14, 38), P(18, 25), P(27, 15))
+    foam.cubicTo(P(37, 5), P(56, 9), P(57, 24))
+    foam.cubicTo(P(58, 34), P(50, 41), P(42, 39))
+    pen = QPen(FOAM, 4.2 * s)
+    pen.setCapStyle(Qt.RoundCap)
+    p.setPen(pen)
     p.drawPath(foam)
 
-    # two notes riding the crest
-    def note(cx, cy, stem_h, r):
-        p.setPen(Qt.NoPen)
-        p.setBrush(QBrush(NOTE))
-        p.drawEllipse(QPointF(cx, cy), r * 1.15, r)
-        pen2 = QPen(NOTE, max(1.0, r * 0.52))
-        pen2.setCapStyle(Qt.RoundCap)
-        p.setPen(pen2)
-        p.drawLine(QPointF(cx + r * 1.05, cy),
-                   QPointF(cx + r * 1.05, cy - stem_h))
-        return QPointF(cx + r * 1.05, cy - stem_h)
-
-    # Sit them low and close, tracking the rise of the crest, so they read as
-    # riding the wave rather than hovering over it.
-    a = note(34 * s, 17 * s, 9 * s, 2.9 * s)
-    b = note(46 * s, 13 * s, 9 * s, 2.9 * s)
-    pen3 = QPen(NOTE, max(1.0, 2.0 * s))
-    pen3.setCapStyle(Qt.RoundCap)
-    p.setPen(pen3)
-    p.drawLine(a, b)
+    # Spray thrown off the lip.
+    p.setPen(Qt.NoPen)
+    p.setBrush(FOAM)
+    for x, y, r in ((36, 41, 2.6), (30, 45, 1.7), (57, 33, 1.9), (24, 47, 1.2)):
+        p.drawEllipse(P(x, y), r * s, r * s)
 
     p.end()
     return pm
@@ -89,22 +104,15 @@ def draw(size: int) -> QPixmap:
 def main():
     app = QApplication(sys.argv)
     out = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(".")
+    out.mkdir(parents=True, exist_ok=True)
+
     sizes = [16, 24, 32, 48, 64, 128, 256]
-    pixmaps = [draw(s) for s in sizes]
-
-    # Biggest as a PNG for anything that wants one
-    pixmaps[-1].save(str(out / "icon.png"))
-
-    # Pack every size into one .ico
-    from PySide6.QtGui import QImage
-    images = [pm.toImage() for pm in pixmaps]
-    ico = out / "icon.ico"
-    writer_ok = pixmaps[-1].save(str(ico))
-    print("png:", out / "icon.png")
-    print("ico:", ico, "ok" if writer_ok else "FAILED")
-    for pm, s in zip(pixmaps, sizes):
-        pm.save(str(out / f"icon_{s}.png"))
+    for s in sizes:
+        draw(s).save(str(out / f"icon_{s}.png"))
+    draw(256).save(str(out / "icon.png"))
+    draw(256).save(str(out / "icon.ico"))
     print("sizes:", sizes)
+    print("wrote:", out / "icon.ico")
 
 
 if __name__ == "__main__":
