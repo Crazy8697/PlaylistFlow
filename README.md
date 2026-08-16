@@ -1,31 +1,234 @@
+<div align="center">
+
+<img src="assets/icon_128.png" width="96" alt="Playlist Flow">
+
 # Playlist Flow
 
-Native Windows app for planning playlists by harmonic key and tempo. Loads a
-Spotify playlist, fills in BPM and Camelot key, and shows where the seams
-between tracks will fight you.
+**Plan playlists by harmonic key and tempo.**
 
-PySide6 (Qt) — no browser, no webview, no local server.
+Loads a Spotify playlist, fills in BPM and Camelot key, shows you where the
+seams between tracks will fight you, and pushes the reordered playlist back.
 
-![the window](assets/icon_128.png)
+Native Qt. No browser, no webview, no local web server.
 
-## What it does
+</div>
 
-- **Load** a playlist straight from your Spotify account, or by URL
-- **Fetch** BPM and key, trying several sources in order and caching forever
-- **Order** by dragging rows or bars, or sort down the wheel / by tempo
-- **See** the seams: key relationship and tempo relationship for every pair,
-  with a hard warning only when both are off
-- **Hear** a transition before committing — plays the tail of one track into
-  the next through your own Spotify
-- **Push** the finished order back to Spotify
+---
 
-## The domain rules
+## Contents
 
-These were tuned by ear against a real library. Don't "improve" them.
+- [What you need](#what-you-need)
+- [Accounts, one at a time](#accounts-one-at-a-time)
+- [Install](#install)
+- [First run](#first-run)
+- [Using it](#using-it)
+- [Where your files live](#where-your-files-live)
+- [The rules it uses](#the-rules-it-uses)
+- [Where the BPM and key come from](#where-the-bpm-and-key-come-from)
+- [Spotify API notes](#spotify-api-notes)
+- [Tests](#tests)
+- [Troubleshooting](#troubleshooting)
+
+---
+
+## What you need
+
+| | Required? | Free? | What it's for |
+|---|---|---|---|
+| **Spotify Premium** | yes | no | Reading your playlists, and playback control |
+| **Spotify developer app** | yes | yes | The client ID the app signs in with |
+| **FreqBlog account** | yes | yes | BPM and musical key |
+| **GetSongBPM account** | optional | yes | Fallback BPM source |
+| **Brave Search API** | optional | yes | Last resort for obscure tracks |
+| **Python 3.11+** | to build | yes | Only if running from source |
+
+Premium is not optional. Spotify requires it for Web API access, and playback
+control stops working if it lapses.
+
+---
+
+## Accounts, one at a time
+
+### 1. Spotify developer app — required
+
+1. Go to **https://developer.spotify.com/dashboard** and log in with your normal
+   Spotify account
+2. **Create app**. Name and description can be anything
+3. Set **Redirect URI** to exactly:
+   ```
+   http://127.0.0.1:8888/callback
+   ```
+   Use `127.0.0.1`, not `localhost` — Spotify rejects the hostname form
+4. Tick **Web API**, then save
+5. Copy the **Client ID** from the app's settings
+6. **Do not skip this step.** Open the app's **User Management** and add your own
+   name and the email on your Spotify account
+
+Step 6 catches people out. Spotify apps start in Development Mode, which serves
+your playlists only to accounts on that list — your own included. Without it,
+loading a playlist fails with a `403` that looks like a bug.
+
+You do **not** need the client secret. The app signs in with PKCE.
+
+### 2. FreqBlog — required
+
+1. Go to **https://freqblog.com**
+2. Request a free key. No card needed
+3. The key arrives by email
+
+Free tier is 1000 lookups a month. Results are cached permanently, so a track
+only ever costs one lookup no matter how many times you load the playlist.
+
+### 3. GetSongBPM — optional
+
+1. Go to **https://getsongbpm.com/api**
+2. Fill in the form. It asks for a **backlink URL** — a page you control that
+   links to `getsongbpm.com`. Their crawler checks for the link **before**
+   issuing the key, so put the link up first or the form rejects you
+3. The key is issued immediately once the link is found
+
+Coverage of independent artists is thin. Worth having, not worth waiting for.
+
+> The About dialog carries a visible link back to getsongbpm.com, which their
+> terms require. Leave it in place if you use this key.
+
+### 4. Brave Search — optional
+
+1. Go to **https://brave.com/search/api/**
+2. Sign up and take the free tier
+
+Used only for tracks nothing else can resolve. Its BPM is usually right; its
+**key often is not**, so anything it supplies is marked as a guess.
+
+---
+
+## Install
+
+### Option A — just run it
+
+Grab the built folder, put it anywhere, and run `PlaylistFlow.exe`. Make a
+desktop shortcut to that exe if you want one.
+
+### Option B — from source
+
+Needs **Python 3.11 or newer** from [python.org](https://www.python.org/downloads/)
+(tick *Add Python to PATH* during install).
+
+```bat
+git clone https://github.com/Crazy8697/PlaylistFlow.git
+cd PlaylistFlow
+
+py -m venv .venv
+.venv\Scripts\python -m pip install --upgrade pip
+.venv\Scripts\python -m pip install PySide6 requests pyinstaller
+
+.venv\Scripts\python main.py
+```
+
+### Building the exe
+
+```bat
+.venv\Scripts\python makeicon.py assets
+
+.venv\Scripts\python -m PyInstaller --noconfirm --windowed --onedir ^
+  --name PlaylistFlow --icon assets\icon.ico --add-data "assets;assets" ^
+  --exclude-module matplotlib --exclude-module numpy ^
+  --exclude-module PySide6.QtWebEngineCore --exclude-module PySide6.QtMultimedia ^
+  main.py
+
+copy dist\PlaylistFlow\_internal\assets\icon.ico dist\PlaylistFlow\icon.ico
+```
+
+Result lands in `dist\PlaylistFlow\`.
+
+`--onedir`, not `--onefile`. Onefile unpacks ~150 MB to a temp directory on
+every single launch, which costs several seconds each time. Onedir starts
+immediately and still gives you one exe to make a shortcut to.
+
+---
+
+## First run
+
+The app asks for your keys the first time it starts, and won't nag again.
+
+1. Paste the **Spotify client ID** and the **FreqBlog key**. Optional ones can
+   be left blank
+2. Hit **Test** next to each — it checks the key against the real service, so a
+   typo surfaces now rather than as a confusing error mid-fetch
+3. Pick a folder for saved playlists
+4. **Finish setup**
+
+Then sign in: paste a playlist URL and hit **Load playlist**, or use **File →
+Sign in to Spotify…**
+
+Signing in is a one-time, slightly odd dance, because the app deliberately
+opens no network ports:
+
+1. Click **Open Spotify** — your browser opens Spotify's login
+2. Approve
+3. The browser lands on a page that **fails to load**. That is expected and
+   correct — nothing is listening on that address
+4. Copy the whole URL out of the address bar and paste it back into the app
+
+Change any of this later under **File → Settings…**
+
+---
+
+## Using it
+
+| Do this | To get this |
+|---|---|
+| Pick a playlist in the sidebar | Loads it, with anything previously looked up already filled in |
+| **Fetch BPM/key** | Fills the gaps, trying each source in turn |
+| Drag a row, or drag a bar on the chart | Reorder |
+| **Sort: key** / **Sort: BPM** | Straight sort; click again to reverse |
+| Double-click a track | Plays it and everything after it, in the order shown here |
+| **Preview transition** | Plays the tail of the selected track into the next one |
+| **Timeline** | Bar width becomes track length; Ctrl+wheel zooms |
+| **Push order to Spotify** | Reorders the real playlist to match |
+
+| Key | |
+|---|---|
+| `Space` | play / pause |
+| `Ctrl+↑` `Ctrl+↓` | move the selected track |
+| `Ctrl+B` | jump to the next missing BPM or key and start typing |
+| `Ctrl+P` | preview the transition |
+| `Ctrl+F` | fetch |
+| `Ctrl+Z` | undo |
+
+Right-click a track for play / preview / cross-check / remove.
+
+**Reading the table.** A solid coloured key chip came from an audio analysis and
+can be trusted. A **hollow, dashed chip** was scraped off the web and is a
+guess worth checking. A red-tinted row has no BPM or key yet. Anything you type
+in yourself is permanent and is never overwritten by a later fetch.
+
+---
+
+## Where your files live
+
+| What | Where |
+|---|---|
+| Your API keys | `%APPDATA%\PlaylistFlow\.env` |
+| Saved playlists and the BPM/key cache | the folder you chose during setup |
+| Window size, sign-in token, preferences | Windows registry, under `darkrelay\PlaylistFlow` |
+
+Each playlist is saved twice: `<name>.json` when you hit **Save**, and
+`<name>-auto.json` written continuously as you work. The auto file never
+overwrites the manual one, so a deliberate save is always recoverable.
+
+Keys are stored outside the program folder on purpose — that folder gets
+replaced wholesale every time the exe is rebuilt.
+
+---
+
+## The rules it uses
+
+Tuned by ear against a real library. Don't "improve" them.
 
 ```python
-def felt_bpm(bpm):            # trap snare lands on 3, not 2 and 4,
-    return bpm / 2 if bpm >= 130 else bpm    # so 140 feels like 70
+def felt_bpm(bpm):                            # trap snare lands on 3,
+    return bpm / 2 if bpm >= 130 else bpm     # so 140 feels like 70
 
 def key_gap(a, b):
     d = min((a.n - b.n) % 12, (b.n - a.n) % 12)
@@ -34,102 +237,110 @@ def key_gap(a, b):
     return 0 if d == 0 else (1.5 if d == 1 else d + 6)
 ```
 
-`1.5` is the diagonal — one step around the wheel plus a letter flip. It is not
-on the standard compatibility list and it gets its own category anyway.
+`1.5` is **the diagonal** — one step around the wheel plus a letter flip. It is
+not on the standard harmonic-mixing compatibility list. It gets its own
+category anyway, because it works.
 
 Tempo, always computed on felt BPM:
 
-| ratio | reads as | problem |
+| ratio | reads as | a problem? |
 |---|---|---|
 | ≤ 1.07 | locked | no |
 | ≈ 2 (±7%) | half-time | no |
 | ≤ 1.20 | drifts | no |
-| else | jumps | yes |
+| anything else | jumps | yes |
 
-One axis off is survivable. Both off is where it breaks.
+Key and tempo are judged independently. **One axis off is survivable. Both off
+is where it breaks** — and only that gets a hard warning.
 
-## Where the data comes from
+---
 
-Spotify killed `audio_features` in November 2024 and there is no replacement,
-so BPM and key come from elsewhere, in this order:
+## Where the BPM and key come from
 
-1. **FreqBlog** — analyses unknown tracks on demand; misses can resolve minutes
-   later, so re-fetch before concluding anything
-2. **ISRC retry**, then **cleaned titles** — for name-match failures
-3. **GetSongBPM** — near-zero coverage on independent artists, but free
-4. **Brave Search** over songbpm/chordify snippets — fills real gaps, but
-   matched a known-good reference on key only about 4 times in 10. These land
-   with a hollow dashed key chip and are meant to be checked, not trusted
+Spotify removed its `audio_features` endpoint in November 2024 and never
+replaced it, so the numbers come from elsewhere, in this order:
 
-Anything you type in yourself wins permanently and is never overwritten.
+1. **FreqBlog** — analyses tracks it has never seen on demand, so a miss can
+   resolve a few minutes later. Re-fetch before assuming a track is unavailable
+2. **ISRC retry** — an exact recording identifier that cannot mismatch
+3. **Cleaned titles** — strips `(feat. …)`, `- Remastered` and similar
+4. **GetSongBPM**
+5. **Brave Search** over songbpm / chordify snippets
+
+Expect gaps on genuinely obscure tracks. Type those in once; they're cached
+forever.
+
+---
 
 ## Spotify API notes
 
-Worth knowing, because these cost a day to work out:
+Written down because they cost real time to work out:
 
-- `audio_features` is **403 forever** for apps registered after 2024-11-27
-- The playlist items endpoint was renamed in February 2026:
-  `/playlists/{id}/tracks` → `/items`, and `items[].track` → `items[].item`
-- **Client Credentials cannot read playlist items at all** — `/items` answers
-  `401 Valid user authentication required`. Development Mode serves playlist
-  items only to the creator or a collaborator, and Client Credentials carries
-  no identity to check. User auth is mandatory
-- Auth is **PKCE with the redirect pasted back by hand**, so nothing listens on
-  a port
-- Playlist **writes work** in Development Mode
+- `audio_features` is **403 forever** for any app registered after 2024-11-27.
+  There is no application process to get it back
+- The playlist items endpoint was **renamed in February 2026**:
+  `/playlists/{id}/tracks` → `/playlists/{id}/items`, and `items[].track` →
+  `items[].item`. The old path returns 403
+- **Client Credentials cannot read playlist items at all.** `/items` answers
+  `401 Valid user authentication required` — Development Mode serves playlist
+  items only to the creator or a collaborator, and Client Credentials carries no
+  identity to check against. User auth is mandatory, even for a public playlist
+  you own
+- Playlist **writes do work** in Development Mode
+- Track **preview URLs are gone** — there is no audio to analyse locally
 
-## Running it
-
-```
-py -m venv .venv
-.venv\Scripts\python -m pip install PySide6 requests pyinstaller
-copy .env.example .env        # then fill it in
-.venv\Scripts\python main.py
-```
-
-Build the exe and icon:
-
-```
-.venv\Scripts\python makeicon.py assets
-.venv\Scripts\python -m PyInstaller --noconfirm --windowed --onedir ^
-  --name PlaylistFlow --icon assets\icon.ico --add-data "assets;assets" main.py
-```
-
-`--onedir`, not `--onefile`: onefile unpacks ~150MB to a temp directory on every
-launch, which costs several seconds of startup every time.
+---
 
 ## Tests
 
+```bat
+.venv\Scripts\python selftest.py        REM key gaps, felt BPM, tempo, seams
+.venv\Scripts\python testdrag.py        REM reorder integrity
+.venv\Scripts\python testsort.py        REM sort order
+.venv\Scripts\python testkeys.py        REM key names to Camelot
+.venv\Scripts\python testblank.py       REM walking the missing values
+.venv\Scripts\python testgaps.py        REM timeline strip spacing
+.venv\Scripts\python testchartdrag.py   REM chart drag targets
 ```
-.venv\Scripts\python selftest.py        # key gaps, felt BPM, tempo, seams
-.venv\Scripts\python testdrag.py        # reorder integrity
-.venv\Scripts\python testsort.py        # sort order
-.venv\Scripts\python testkeys.py        # key-name to Camelot
-.venv\Scripts\python testblank.py       # walking the missing values
-.venv\Scripts\python testgaps.py        # timeline strip spacing
-.venv\Scripts\python testchartdrag.py   # chart drag targets
-```
 
-The drag tests are worth keeping. Qt's `InternalMove` deletes the dragged row
-*after* `dropEvent` returns, which corrupts a table rebuilt in the handler, and
-answering `CopyAction` does not prevent it — `QTableWidget`'s model doesn't
-advertise `CopyAction`, so Qt coerces it back. The fix is to re-sync the view
-from the track list once the drag has fully finished. A test that calls
-`dropEvent` directly will not catch any of this.
+Keep the drag tests. Qt's `InternalMove` deletes the dragged row *after*
+`dropEvent` returns, which corrupts a table rebuilt inside the handler — and
+answering `CopyAction` does not prevent it, because `QTableWidget`'s model
+doesn't advertise `CopyAction` and Qt coerces the action back. The fix is to
+re-sync the view from the track list once the drag has fully finished. A test
+that calls `dropEvent` directly passes while the real thing is broken.
 
-## Keys
+---
 
-| | |
-|---|---|
-| `Space` | play / pause |
-| `Ctrl+↑` `Ctrl+↓` | move the selected track |
-| `Ctrl+B` | jump to the next missing BPM or key |
-| `Ctrl+P` | preview the transition |
-| `Ctrl+F` | fetch |
-| `Ctrl+Z` | undo |
+## Troubleshooting
 
-## Attribution
+**"Spotify refused the track list" / 403 when loading a playlist**
+Your account isn't on the app's allowlist. Dashboard → your app → **User
+Management** → add your name and the email on your Spotify account.
+
+**Sign-in page fails to load after approving**
+That's correct. Copy the URL out of the address bar and paste it into the app.
+
+**"No active Spotify device"**
+Open Spotify and play something for a second, so it registers as a device.
+Playback is a remote control — the audio always comes from your Spotify.
+
+**Player says "This needs Spotify Premium"**
+It does.
+
+**A track's BPM looks wrong**
+Cross-check it: right-click → **Cross-check BPM & key on the web**, compare, and
+type in whatever's right. Typed values are permanent.
+
+**Everything comes back "not found"**
+Check the FreqBlog key under **File → Settings** and hit **Test**. If it says
+rate limited, you're out of monthly quota.
+
+---
+
+## Credits
 
 BPM and key data by [FreqBlog](https://freqblog.com) and
 [GetSongBPM](https://getsongbpm.com). Playlist and track metadata from Spotify.
-The About dialog carries these links, which GetSongBPM require.
+
+Built by [darkrelay.net](https://darkrelay.net).
