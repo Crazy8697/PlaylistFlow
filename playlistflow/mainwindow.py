@@ -7,7 +7,8 @@ import time
 
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QUrl
 from PySide6.QtGui import (QAction, QKeySequence, QGuiApplication,
-                           QDesktopServices, QShortcut)
+                           QDesktopServices, QShortcut, QPainter, QPixmap,
+                           QColor, QLinearGradient, QBrush)
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QSplitter, QPlainTextEdit,
@@ -31,6 +32,7 @@ from .table import TrackTable, COL_BPM, COL_KEY
 from .spinner import Spinner
 from .player import PlayerBar
 from .brand import spotify_icon, spotify_pixmap, icon_size
+from .artwork import wave_pixmap
 from .websearch import BraveLookup
 
 UNDO_CAP = 40
@@ -282,7 +284,8 @@ class AboutDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("About Playlist Flow")
-        self.setMinimumWidth(430)
+        self.setMinimumWidth(470)
+        self._bg: QPixmap | None = None
         lay = QVBoxLayout(self)
         lab = QLabel(
             "<h3 style='margin-bottom:2px'>Playlist Flow</h3>"
@@ -304,11 +307,47 @@ class AboutDialog(QDialog):
         )
         lab.setOpenExternalLinks(True)
         lab.setWordWrap(True)
+        # The app-wide stylesheet fills every QWidget, which would paint over
+        # the artwork behind this dialog.
+        lab.setStyleSheet("background: transparent;")
         lay.addWidget(lab)
         bb = QDialogButtonBox(QDialogButtonBox.Close)
+        bb.setStyleSheet("QDialogButtonBox { background: transparent; }")
         bb.rejected.connect(self.reject)
         bb.accepted.connect(self.accept)
         lay.addWidget(bb)
+
+    def paintEvent(self, e):
+        """The wave, faint, behind the text.
+
+        Kept at low opacity and darkened toward the top-left, where the text
+        sits — decoration must not cost legibility.
+        """
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor("#101216"))
+
+        # The whole wave, not a crop of it — enlarged far enough and it stops
+        # reading as a wave and becomes an abstract swoosh.
+        side = int(self.height() * 0.92)
+        if self._bg is None or self._bg.width() != side:
+            # No sky: the gradient's square edge reads as a pasted-on box.
+            # Just the water shapes, floating on the dialog's own background.
+            self._bg = wave_pixmap(side, rounded=False, sky=False)
+
+        p.setOpacity(0.5)
+        p.drawPixmap(self.width() - side - int(side * 0.02),
+                     self.height() - side, self._bg)
+        p.setOpacity(1.0)
+
+        # Wash it back down under the text. Heaviest on the left, where every
+        # line starts, easing off to the right where there is nothing to read.
+        wash = QLinearGradient(0, 0, self.width(), 0)
+        wash.setColorAt(0.00, QColor(16, 18, 22, 236))
+        wash.setColorAt(0.55, QColor(16, 18, 22, 200))
+        wash.setColorAt(1.00, QColor(16, 18, 22, 96))
+        p.fillRect(self.rect(), QBrush(wash))
+        p.end()
+        super().paintEvent(e)
 
 
 # --------------------------------------------------------------------------
