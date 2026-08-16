@@ -30,6 +30,7 @@ from .chart import BarChart
 from .table import TrackTable, COL_BPM, COL_KEY
 from .spinner import Spinner
 from .player import PlayerBar
+from .brand import spotify_icon, icon_size
 from .websearch import BraveLookup
 
 UNDO_CAP = 40
@@ -431,18 +432,26 @@ class MainWindow(QMainWindow):
         self.url_in.setPlaceholderText("Spotify playlist URL or ID")
         self.url_in.returnPressed.connect(self.load_playlist)
         bar.addWidget(self.url_in, 1)
-        for text, slot, tip in (
-            ("Load playlist", self.load_playlist, ""),
+        for text, slot, tip, mark in (
+            ("Load playlist", self.load_playlist, "", True),
+            ("Sync", self.sync_playlist,
+             "Re-read this playlist from Spotify.\n\n"
+             "Tracks added there are appended, tracks removed there are removed "
+             "here, and everything else keeps the order and the BPM/key it "
+             "already has.", True),
             ("Fetch BPM/key", self.fetch_features,
-             "Look up anything still missing."),
+             "Look up anything still missing.", False),
             ("Analyze", self.reanalyze,
              "Recompute the chart and the key/tempo readout between every "
-             "pair of tracks from the current BPM and key values."),
+             "pair of tracks from the current BPM and key values.", False),
         ):
             b = QPushButton(text)
             b.clicked.connect(slot)
             if tip:
                 b.setToolTip(tip)
+            if mark:
+                b.setIcon(spotify_icon(15))
+                b.setIconSize(icon_size(15))
             bar.addWidget(b)
         cl.addLayout(bar)
 
@@ -573,6 +582,8 @@ class MainWindow(QMainWindow):
         b.setToolTip("Reorder the Spotify playlist to match this window.\n"
                      "Moves tracks rather than replacing them, so nothing is "
                      "removed and the dates added are kept.")
+        b.setIcon(spotify_icon(15))
+        b.setIconSize(icon_size(15))
         b.clicked.connect(self.push_order)
         row.addWidget(b)
         el.addLayout(row)
@@ -959,6 +970,75 @@ class MainWindow(QMainWindow):
             self.status("Pick a playlist first.")
             return
         self._load_pid(it.data(Qt.UserRole))
+
+    def sync_playlist(self):
+        """Re-read the playlist from Spotify without losing local work.
+
+        A plain reload would throw away the ordering, which is the whole point
+        of the app. So this only reconciles membership: tracks added on Spotify
+        are appended, tracks removed there are removed here, and everything
+        else keeps its position and its BPM/key exactly as it is.
+        """
+        if not self.current_pid:
+            self.status("This playlist did not come from Spotify.")
+            return
+        if not self.auth.authorised and not self.sign_in():
+            return
+        self.busy_on("Syncing…")
+        try:
+            rows = self.spotify.playlist_tracks(self.current_pid)
+        except AuthError:
+            if not self.sign_in():
+                return
+            try:
+                rows = self.spotify.playlist_tracks(self.current_pid)
+            except (ProviderError, AuthError) as e:
+                QMessageBox.warning(self, "Sync", str(e))
+                return
+        except ProviderError as e:
+            QMessageBox.warning(self, "Sync", str(e))
+            return
+        finally:
+            self.busy_off()
+
+        remote = {r.uri: r for r in rows if r.uri}
+        here = {t.uri for t in self.tracks if t.uri}
+
+        gone = [t for t in self.tracks if t.uri and t.uri not in remote]
+        added = [r for uri, r in remote.items() if uri not in here]
+        local_only = [t for t in self.tracks if not t.uri]
+
+        if not gone and not added:
+            self.status(f"Already in sync — {len(self.tracks)} tracks.")
+            return
+
+        msg = []
+        if added:
+            msg.append(f"{len(added)} added on Spotify → appended to the end")
+        if gone:
+            names = ", ".join(f"'{t.title}'" for t in gone[:3])
+            more = f" and {len(gone) - 3} more" if len(gone) > 3 else ""
+            msg.append(f"{len(gone)} removed on Spotify → removed here ({names}{more})")
+        if local_only:
+            msg.append(f"{len(local_only)} track(s) you added by hand are kept")
+        if QMessageBox.question(
+            self, "Sync from Spotify",
+            "\n\n".join(msg) + "\n\nYour ordering is kept for everything else."
+        ) != QMessageBox.Yes:
+            return
+
+        self.snapshot()
+        kept = [t for t in self.tracks if not t.uri or t.uri in remote]
+        for r in added:
+            t = Track(title=r.title, artist=r.artist, uri=r.uri, isrc=r.isrc,
+                      duration_ms=r.duration_ms)
+            self.store.apply_cache(t)
+            kept.append(t)
+        self.tracks = kept
+        self.refresh()
+        unresolved = sum(1 for t in self.tracks if not t.resolved)
+        tail = f" {unresolved} need BPM/key." if unresolved else ""
+        self.status(f"Synced — {len(added)} added, {len(gone)} removed.{tail}")
 
     def _load_pid(self, pid: str):
         if not pid:
