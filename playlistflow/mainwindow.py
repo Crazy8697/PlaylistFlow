@@ -33,6 +33,7 @@ from .spinner import Spinner
 from .player import PlayerBar
 from .brand import spotify_icon, spotify_pixmap, icon_size
 from .artwork import wave_pixmap
+from .wheel import KeyWheelDialog
 from .websearch import BraveLookup
 
 UNDO_CAP = 40
@@ -368,6 +369,7 @@ class MainWindow(QMainWindow):
         self.current_name = ""
         self.current_pid = ""          # Spotify playlist id, when it came from there
         self.worker: FetchWorker | None = None
+        self.wheel: KeyWheelDialog | None = None
         self._refreshing_spotify = False
         self._sort_field = ""
         self._sort_desc = False
@@ -535,6 +537,11 @@ class MainWindow(QMainWindow):
         b.setToolTip("Recompute the chart and the key/tempo readout between "
                      "every pair of tracks from the current BPM and key values.")
         b.clicked.connect(self.reanalyze)
+        ctl.addWidget(b)
+        b = QPushButton("Key wheel")
+        b.setToolTip("Camelot wheel. Follows the selected track and lights the "
+                     "keys that mix with it. Stays open while you work.")
+        b.clicked.connect(self.open_wheel)
         ctl.addWidget(b)
         ctl.addStretch(1)
         self.spinner = Spinner(16)
@@ -1361,10 +1368,28 @@ class MainWindow(QMainWindow):
             self.table.selectRow(i)
             self.table.scrollToItem(self.table.item(i, 0))
 
+    def open_wheel(self):
+        if self.wheel is None:
+            self.wheel = KeyWheelDialog(self)
+        self.wheel.show()
+        self.wheel.raise_()
+        self.wheel.activateWindow()
+        self._sync_selection()
+
+    def _push_to_wheel(self):
+        if self.wheel is None or not self.wheel.isVisible():
+            return
+        rows = sorted({i.row() for i in self.table.selectedIndexes()})
+        if not rows or rows[0] >= len(self.tracks):
+            return
+        t = self.tracks[rows[0]]
+        self.wheel.follow(t.key, f"{t.artist} — {t.title}")
+
     def _sync_selection(self):
         rows = sorted({i.row() for i in self.table.selectedIndexes()})
         sel = rows[0] if rows else -1
         self.chart.set_data(self.tracks, seams(self.tracks), self.felt, sel)
+        self._push_to_wheel()
 
     def toggle_timeline(self):
         on = self.btn_timeline.isChecked()
