@@ -387,6 +387,9 @@ class MainWindow(QMainWindow):
         side.setMinimumWidth(150)
         sl = QVBoxLayout(side)
         sl.setContentsMargins(0, 0, 0, 0)
+        # Same spacing as the main column, or the sidebar's list sits a few
+        # pixels higher than the chart next to it.
+        sl.setSpacing(9)
 
         head = QHBoxLayout()
         head.setSpacing(6)
@@ -401,12 +404,11 @@ class MainWindow(QMainWindow):
             "Tracks added there are appended, tracks removed there are removed "
             "here, and everything else keeps the order and the BPM/key it "
             "already has.")
-        # The global button padding is sized for the main row; override it here
-        # or the label clips inside a header-height button.
-        b.setStyleSheet("padding: 2px 8px; font-size: 11px;")
-        b.setFixedHeight(21)
         b.clicked.connect(self.sync_playlist)
         head.addWidget(b)
+        # Match the main button row's height exactly, so the playlist list and
+        # the chart below start on the same line.
+        self.sp_head = head
         sl.addLayout(head)
 
         self.sp_list = QListWidget()
@@ -608,6 +610,19 @@ class MainWindow(QMainWindow):
         outer.setStretchFactor(0, 0)
         outer.setStretchFactor(1, 1)
         outer.setSizes([240, 1040])
+
+        # The sidebar header and the main button row are separate layouts, so
+        # nothing makes them the same height on its own — and any difference
+        # offsets the playlist list from the chart beside it. Pin the shorter
+        # one to the taller.
+        h = max(self.btn_rep.sizeHint().height(), 24)
+        self.sp_head.addStretch(0)
+        for i in range(self.sp_head.count()):
+            w = self.sp_head.itemAt(i).widget()
+            if w is not None:
+                w.setMinimumHeight(h)
+        ctl.setContentsMargins(0, 0, 0, 0)
+        head.setContentsMargins(0, 0, 0, 0)
 
     def _build_menu(self):
         m = self.menuBar().addMenu("&File")
