@@ -23,22 +23,84 @@ def app_dir() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
-def load_env() -> dict:
+KEYS = (
+    "SPOTIFY_CLIENT_ID",
+    "SPOTIFY_CLIENT_SECRET",
+    "FREQBLOG_API_KEY",
+    "GETSONGBPM_API_KEY",
+    "BRAVE_API_KEY",
+)
+
+# Keys without which the app cannot do its job.
+REQUIRED = ("SPOTIFY_CLIENT_ID", "FREQBLOG_API_KEY")
+
+
+def user_config_dir() -> Path:
+    """Where settings entered in the app are written.
+
+    Not next to the exe: that folder is replaced wholesale on every rebuild,
+    so anything saved there would be lost.
+    """
+    base = os.environ.get("APPDATA") or str(Path.home())
+    return Path(base) / APP
+
+
+def env_path() -> Path:
+    return user_config_dir() / ".env"
+
+
+def _read_env_file(path: Path) -> dict:
     """Minimal .env reader. KEY=value, # comments, no quoting rules."""
-    env: dict[str, str] = {}
-    path = app_dir() / ".env"
-    if path.exists():
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            k, v = line.split("=", 1)
-            env[k.strip()] = v.strip().strip('"').strip("'")
-    # Real environment variables win, so you can override without editing the file.
-    for k in ("SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET", "FREQBLOG_API_KEY"):
+    out: dict[str, str] = {}
+    if not path.exists():
+        return out
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return out
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        out[k.strip()] = v.strip().strip('"').strip("'")
+    return out
+
+
+def load_env() -> dict:
+    """Later sources win: bundled file, then the user's own, then the real
+    environment (so a key can be overridden without editing anything)."""
+    env = _read_env_file(app_dir() / ".env")
+    env.update(_read_env_file(env_path()))
+    for k in KEYS:
         if os.environ.get(k):
             env[k] = os.environ[k]
-    return env
+    return {k: v for k, v in env.items() if v}
+
+
+def save_env(values: dict) -> Path:
+    """Write the user's own .env. Blank entries are dropped rather than stored
+    as empty strings, so 'not set' and 'set to nothing' stay the same thing."""
+    path = env_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "# Playlist Flow settings. Written by the app — safe to edit by hand.",
+        "# Never commit this file.",
+        "",
+    ]
+    for k in KEYS:
+        v = (values.get(k) or "").strip()
+        if v:
+            lines.append(f"{k}={v}")
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    tmp.replace(path)
+    return path
+
+
+def missing_required(env: dict | None = None) -> list[str]:
+    env = env if env is not None else load_env()
+    return [k for k in REQUIRED if not env.get(k)]
 
 
 class Prefs:

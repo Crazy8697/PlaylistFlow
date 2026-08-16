@@ -21,7 +21,10 @@ from .providers import Spotify, FreqBlog, GetSongBPM, ProviderError, Features
 from .auth import SpotifyAuth, AuthError
 from .keys import clean_title, primary_artist
 from .store import Store
-from .config import Prefs, load_env
+from pathlib import Path
+
+from .config import Prefs, load_env, missing_required
+from .settings import SettingsDialog
 from .chart import BarChart
 from .table import TrackTable, COL_BPM, COL_KEY
 from .spinner import Spinner
@@ -352,7 +355,11 @@ class MainWindow(QMainWindow):
         self._build_menu()
         self._build_shortcuts()
         self._restore_layout()
-        QTimer.singleShot(0, self._ensure_storage)
+        QTimer.singleShot(0, self._start)
+
+    def _start(self):
+        self._first_run()
+        self._ensure_storage()
 
     # ---------------- ui ----------------
 
@@ -588,6 +595,8 @@ class MainWindow(QMainWindow):
         m = self.menuBar().addMenu("&File")
         a = QAction("&Save", self); a.setShortcut(QKeySequence.Save)
         a.triggered.connect(self.save_playlist); m.addAction(a)
+        a = QAction("&Settings…", self)
+        a.triggered.connect(self.open_settings); m.addAction(a)
         a = QAction("Change storage folder…", self)
         a.triggered.connect(self.choose_storage); m.addAction(a)
         m.addSeparator()
@@ -732,14 +741,41 @@ class MainWindow(QMainWindow):
 
     # ---------------- storage ----------------
 
+    def _first_run(self):
+        """Nothing works without the two required keys, so ask up front rather
+        than failing later with a 401 that reads like a bug."""
+        if not missing_required(self.env):
+            return
+        dlg = SettingsDialog(self, first_run=True, prefs=self.prefs)
+        if dlg.exec() == QDialog.Accepted:
+            self._reload_env()
+            self.status("Setup saved.")
+        else:
+            self.status("Setup skipped — add your keys under File → Settings.")
+
+    def open_settings(self):
+        dlg = SettingsDialog(self, first_run=False, prefs=self.prefs)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        old_dir = self.store.root if self.store else None
+        self._reload_env()
+        if self.prefs.storage_dir and str(old_dir) != self.prefs.storage_dir:
+            self.store = Store(self.prefs.storage_dir)
+            self.refresh_saved()
+        self.status("Settings saved.")
+
+    def _reload_env(self):
+        """Rebuild every client so new keys take effect without a restart."""
+        self.env = load_env()
+        self.auth.client_id = self.env.get("SPOTIFY_CLIENT_ID", "")
+        self.freqblog.api_key = self.env.get("FREQBLOG_API_KEY", "")
+        self.getsongbpm.api_key = self.env.get("GETSONGBPM_API_KEY", "")
+        self.web.api_key = self.env.get("BRAVE_API_KEY", "")
+
     def _ensure_storage(self):
         d = self.prefs.storage_dir
         if not d:
-            d = QFileDialog.getExistingDirectory(
-                self, "Pick a folder for saved playlists"
-            )
-            if not d:
-                d = str((__import__("pathlib").Path.home() / "PlaylistFlow"))
+            d = str(Path.home() / "Documents" / "PlaylistFlow")
             self.prefs.storage_dir = d
         self.store = Store(d)
         self.refresh_saved()
