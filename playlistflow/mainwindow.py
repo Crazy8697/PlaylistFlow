@@ -23,6 +23,7 @@ from .keys import clean_title, primary_artist
 from .store import Store
 from pathlib import Path
 
+from . import __version__, __url__
 from .config import Prefs, load_env, missing_required
 from .settings import SettingsDialog
 from .chart import BarChart
@@ -284,7 +285,12 @@ class AboutDialog(QDialog):
         lay = QVBoxLayout(self)
         lab = QLabel(
             "<h3 style='margin-bottom:2px'>Playlist Flow</h3>"
+            f"<p style='color:#5C636D;margin-top:0'>Version {__version__}</p>"
             "<p style='color:#8C939D'>Harmonic and tempo sequencing for playlists.</p>"
+            "<p>Built by <a style='color:#3FA8D9' href='https://darkrelay.net'>"
+            "darkrelay.net</a> &nbsp;·&nbsp; "
+            f"<a style='color:#3FA8D9' href='{__url__}'>Crazy8697 on GitHub</a></p>"
+            "<hr style='border:none;border-top:1px solid #2C313A'>"
             "<p>BPM and musical key data by "
             "<a style='color:#3FA8D9' href='https://freqblog.com'>FreqBlog</a>.</p>"
             "<p>Additional BPM data by "
@@ -311,7 +317,7 @@ class AboutDialog(QDialog):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Playlist Flow")
+        self.setWindowTitle(f"Playlist Flow {__version__}")
         self.resize(1280, 860)
 
         self.env = load_env()
