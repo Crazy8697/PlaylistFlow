@@ -30,7 +30,7 @@ from .chart import BarChart
 from .table import TrackTable, COL_BPM, COL_KEY
 from .spinner import Spinner
 from .player import PlayerBar
-from .brand import spotify_icon, icon_size
+from .brand import spotify_icon, spotify_pixmap, icon_size
 from .websearch import BraveLookup
 
 UNDO_CAP = 40
@@ -388,7 +388,27 @@ class MainWindow(QMainWindow):
         sl = QVBoxLayout(side)
         sl.setContentsMargins(0, 0, 0, 0)
 
-        sl.addWidget(QLabel("SPOTIFY"))
+        head = QHBoxLayout()
+        head.setSpacing(6)
+        mark = QLabel()
+        mark.setPixmap(spotify_pixmap(15))
+        head.addWidget(mark)
+        head.addWidget(QLabel("SPOTIFY"))
+        head.addStretch(1)
+        b = QPushButton("Sync")
+        b.setToolTip(
+            "Re-read the loaded playlist from Spotify.\n\n"
+            "Tracks added there are appended, tracks removed there are removed "
+            "here, and everything else keeps the order and the BPM/key it "
+            "already has.")
+        # The global button padding is sized for the main row; override it here
+        # or the label clips inside a header-height button.
+        b.setStyleSheet("padding: 2px 8px; font-size: 11px;")
+        b.setFixedHeight(21)
+        b.clicked.connect(self.sync_playlist)
+        head.addWidget(b)
+        sl.addLayout(head)
+
         self.sp_list = QListWidget()
         self.sp_list.itemDoubleClicked.connect(lambda _: self.load_from_spotify())
         sl.addWidget(self.sp_list, 1)
@@ -426,36 +446,8 @@ class MainWindow(QMainWindow):
         cl.setContentsMargins(0, 0, 0, 0)
         cl.setSpacing(9)
 
-        # load bar
-        bar = QHBoxLayout()
-        self.url_in = QLineEdit()
-        self.url_in.setPlaceholderText("Spotify playlist URL or ID")
-        self.url_in.returnPressed.connect(self.load_playlist)
-        bar.addWidget(self.url_in, 1)
-        for text, slot, tip, mark in (
-            ("Load playlist", self.load_playlist, "", True),
-            ("Sync", self.sync_playlist,
-             "Re-read this playlist from Spotify.\n\n"
-             "Tracks added there are appended, tracks removed there are removed "
-             "here, and everything else keeps the order and the BPM/key it "
-             "already has.", True),
-            ("Fetch BPM/key", self.fetch_features,
-             "Look up anything still missing.", False),
-            ("Analyze", self.reanalyze,
-             "Recompute the chart and the key/tempo readout between every "
-             "pair of tracks from the current BPM and key values.", False),
-        ):
-            b = QPushButton(text)
-            b.clicked.connect(slot)
-            if tip:
-                b.setToolTip(tip)
-            if mark:
-                b.setIcon(spotify_icon(15))
-                b.setIconSize(icon_size(15))
-            bar.addWidget(b)
-        cl.addLayout(bar)
-
-        # controls
+        # controls — one row, no separate load bar. Loading by URL lives under
+        # File, since it is a once-in-a-while thing next to these.
         ctl = QHBoxLayout()
         self.btn_rep = QPushButton("Reported BPM")
         self.btn_felt = QPushButton("Felt BPM")
@@ -493,6 +485,15 @@ class MainWindow(QMainWindow):
         ctl.addWidget(b)
         b = QPushButton("Save")
         b.clicked.connect(self.save_playlist)
+        ctl.addWidget(b)
+        b = QPushButton("Fetch BPM/key")
+        b.setToolTip("Look up anything still missing.")
+        b.clicked.connect(self.fetch_features)
+        ctl.addWidget(b)
+        b = QPushButton("Analyze")
+        b.setToolTip("Recompute the chart and the key/tempo readout between "
+                     "every pair of tracks from the current BPM and key values.")
+        b.clicked.connect(self.reanalyze)
         ctl.addWidget(b)
         ctl.addStretch(1)
         self.spinner = Spinner(16)
@@ -610,6 +611,15 @@ class MainWindow(QMainWindow):
 
     def _build_menu(self):
         m = self.menuBar().addMenu("&File")
+        a = QAction("Load playlist from a &link…", self)
+        a.setShortcut(QKeySequence("Ctrl+L"))
+        a.setIcon(spotify_icon(15))
+        a.triggered.connect(self.load_playlist); m.addAction(a)
+        a = QAction("S&ync from Spotify", self)
+        a.setShortcut(QKeySequence("Ctrl+R"))
+        a.setIcon(spotify_icon(15))
+        a.triggered.connect(self.sync_playlist); m.addAction(a)
+        m.addSeparator()
         a = QAction("&Save", self); a.setShortcut(QKeySequence.Save)
         a.triggered.connect(self.save_playlist); m.addAction(a)
         a = QAction("&Settings…", self)
@@ -910,11 +920,17 @@ class MainWindow(QMainWindow):
     # ---------------- data ops ----------------
 
     def load_playlist(self):
-        text = self.url_in.text().strip()
-        if not text:
+        """Load by pasted URL or ID — for playlists that aren't on the account,
+        or someone else's link."""
+        text, ok = QInputDialog.getText(
+            self, "Load playlist from a link",
+            "Paste a Spotify playlist link or ID:\n"
+            "(Development Mode only serves playlists you created or "
+            "collaborate on.)")
+        if not ok or not text.strip():
             return
         try:
-            pid = Spotify.playlist_id(text)
+            pid = Spotify.playlist_id(text.strip())
         except ProviderError as e:
             self.status(str(e))
             return
