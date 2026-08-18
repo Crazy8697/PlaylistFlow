@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QListWidget, QListWidgetItem, QSplitter, QPlainTextEdit,
     QMessageBox, QFileDialog, QInputDialog, QDialog, QDialogButtonBox,
     QGroupBox, QFormLayout, QApplication, QAbstractItemView, QSplitter,
-    QScrollArea,
+    QScrollArea, QRadioButton, QComboBox, QButtonGroup,
 )
 
 from .domain import Track, seams, summary, valid_key, felt_bpm
@@ -277,6 +277,86 @@ class SignInDialog(QDialog):
             self.msg.setText(f"<span style='color:#E8544F'>{e}</span>")
             return
         self.accept()
+
+
+class PlaylistTargetDialog(QDialog):
+    """Where do freshly-found tracks go when nothing is open?
+
+    Without this the finder dropped tracks into an untitled list that was never
+    written to disk, so nothing autosaved and the work was one crash from gone.
+    """
+
+    def __init__(self, store, count: int, loose: int, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Add tracks to…")
+        self.setMinimumWidth(430)
+        self.store = store
+
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel(
+            "<p>No playlist is open. Where should these "
+            f"<b>{count}</b> track{'s' if count != 1 else ''} go?</p>"))
+
+        self.grp = QButtonGroup(self)
+
+        self.r_new = QRadioButton("New playlist")
+        self.r_new.setChecked(True)
+        self.grp.addButton(self.r_new)
+        lay.addWidget(self.r_new)
+        self.name = QLineEdit()
+        self.name.setPlaceholderText("Name it…")
+        lay.addWidget(self.name)
+
+        names = store.list_playlists() if store else []
+        self.r_old = QRadioButton("Add to a saved playlist")
+        self.r_old.setEnabled(bool(names))
+        self.grp.addButton(self.r_old)
+        lay.addWidget(self.r_old)
+        self.combo = QComboBox()
+        self.combo.addItems(names)
+        self.combo.setEnabled(False)
+        lay.addWidget(self.combo)
+
+        if loose:
+            # Loading a saved playlist replaces whatever is on screen, so say so
+            # rather than letting unsaved rows vanish.
+            self.warn = QLabel(
+                f"<span style='color:#E8A93E'>{loose} track"
+                f"{'s' if loose != 1 else ''} already on screen "
+                "would be replaced by the saved playlist.</span>")
+            self.warn.setWordWrap(True)
+            self.warn.setVisible(False)
+            lay.addWidget(self.warn)
+        else:
+            self.warn = None
+
+        self.r_new.toggled.connect(self._sync)
+        self._sync()
+
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self._ok)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+    def _sync(self):
+        new = self.r_new.isChecked()
+        self.name.setEnabled(new)
+        self.combo.setEnabled(not new)
+        if self.warn is not None:
+            self.warn.setVisible(not new)
+        (self.name if new else self.combo).setFocus()
+
+    def _ok(self):
+        if self.r_new.isChecked() and not self.name.text().strip():
+            self.name.setFocus()
+            return
+        self.accept()
+
+    def choice(self) -> tuple:
+        """("new"|"existing", name)"""
+        if self.r_new.isChecked():
+            return "new", self.name.text().strip()
+        return "existing", self.combo.currentText()
 
 
 class AboutDialog(QDialog):
@@ -1187,6 +1267,35 @@ class MainWindow(QMainWindow):
         """
         if not tracks:
             return
+
+        # One undo should put things back the way they were, so the snapshot
+        # is taken once — after the target dialog is accepted, never on cancel.
+        snapped = False
+
+        # Nothing open means nothing autosaves, so ask where these belong
+        # before they land in an untitled list.
+        if not self.current_name:
+            self._ensure_storage()
+            if not self.store:
+                self.status("Pick a storage folder first.")
+                return
+            dlg = PlaylistTargetDialog(self.store, len(tracks), len(self.tracks), self)
+            if dlg.exec() != QDialog.Accepted:
+                self.status("Nothing added — no playlist chosen.")
+                return
+            how, name = dlg.choice()
+            if not name:
+                self.status("Nothing added — no playlist chosen.")
+                return
+            self.snapshot()
+            snapped = True
+            if how == "existing":
+                self.tracks = self.store.load(name)
+                self.current_pid = self.store.last_loaded_pid
+            else:
+                self.current_pid = ""
+            self.current_name = name
+
         have = {t.uri for t in self.tracks if t.uri}
         fresh = [t for t in tracks if not t.uri or t.uri not in have]
         skipped = len(tracks) - len(fresh)
@@ -1195,15 +1304,20 @@ class MainWindow(QMainWindow):
             self.status("All %d were already in the playlist — nothing added." % skipped)
             return
 
-        self.snapshot()
+        if not snapped:
+            self.snapshot()
         for t in fresh:
             if not t.resolved and self.store:
                 self.store.apply_cache(t)
             self.tracks.append(t)
         self.refresh()
-        msg = "Added %d tracks from the finder" % len(fresh)
+        if self.store and self.current_name:
+            self.store.save(self.current_name, self.tracks, auto=False,
+                            pid=self.current_pid)
+            self.refresh_saved()
+        msg = "Added %d tracks to %s" % (len(fresh), self.current_name or "the playlist")
         if skipped:
-            msg += " (skipped %d already in the playlist)" % skipped
+            msg += " (skipped %d already there)" % skipped
         self.status(msg + " — fetching BPM/key.")
         QTimer.singleShot(0, self.fetch_features)
 
