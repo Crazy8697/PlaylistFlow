@@ -32,9 +32,10 @@ from .table import TrackTable, COL_BPM, COL_KEY
 from .spinner import Spinner
 from .player import PlayerBar
 from .brand import spotify_icon, spotify_pixmap, icon_size
-from .artwork import wave_pixmap
+from .artwork import about_pixmap
 from .wheel import KeyWheelDialog
 from .websearch import BraveLookup
+from .finderdialog import FinderDialog
 
 UNDO_CAP = 40
 AUTOSAVE_MS = 1500
@@ -319,25 +320,21 @@ class AboutDialog(QDialog):
         lay.addWidget(bb)
 
     def paintEvent(self, e):
-        """The wave, faint, behind the text.
+        """The full scene, faint, behind the text.
 
-        Kept at low opacity and darkened toward the top-left, where the text
-        sits — decoration must not cost legibility.
+        Kept at low opacity and washed out toward the left, where every line
+        starts — decoration must not cost legibility.
         """
         p = QPainter(self)
         p.fillRect(self.rect(), QColor("#101216"))
 
-        # The whole wave, not a crop of it — enlarged far enough and it stops
-        # reading as a wave and becomes an abstract swoosh.
-        side = int(self.height() * 0.92)
-        if self._bg is None or self._bg.width() != side:
-            # No sky: the gradient's square edge reads as a pasted-on box.
-            # Just the water shapes, floating on the dialog's own background.
-            self._bg = wave_pixmap(side, rounded=False, sky=False)
+        # Full-bleed rather than a floating square: this illustration is a
+        # composed scene with its own sky, so an inset copy reads as a sticker.
+        if self._bg is None or self._bg.size() != self.size():
+            self._bg = about_pixmap(self.width(), self.height())
 
-        p.setOpacity(0.5)
-        p.drawPixmap(self.width() - side - int(side * 0.02),
-                     self.height() - side, self._bg)
+        p.setOpacity(0.40)
+        p.drawPixmap(0, 0, self._bg)
         p.setOpacity(1.0)
 
         # Wash it back down under the text. Heaviest on the left, where every
@@ -680,6 +677,10 @@ class MainWindow(QMainWindow):
         a.setShortcut(QKeySequence("Ctrl+R"))
         a.setIcon(spotify_icon(15))
         a.triggered.connect(self.sync_playlist); m.addAction(a)
+        a = QAction("Find tracks in &bulk…", self)
+        a.setShortcut(QKeySequence("Ctrl+Shift+F"))
+        a.setIcon(spotify_icon(15))
+        a.triggered.connect(self.bulk_finder); m.addAction(a)
         m.addSeparator()
         a = QAction("&Save", self); a.setShortcut(QKeySequence.Save)
         a.triggered.connect(self.save_playlist); m.addAction(a)
@@ -735,6 +736,7 @@ class MainWindow(QMainWindow):
         add("Ctrl+B", self.jump_next_blank)
         add("Ctrl+P", lambda: self.preview_transition(self.player.tail.value()))
         add("Ctrl+F", self.fetch_features)
+        add("Ctrl+Shift+F", self.bulk_finder)
 
     def _space(self):
         # Space is a normal character while a cell is being edited.
@@ -1159,6 +1161,35 @@ class MainWindow(QMainWindow):
             f"Loaded {len(self.tracks)} tracks from '{self.current_name}' "
             f"({cached} already known). Hit Fetch BPM/key for the rest."
         )
+
+    def bulk_finder(self):
+        """Paste a plain-text song list, resolve it to track URIs.
+
+        Search needs the same user token everything else uses, so an unsigned-in
+        user is sent through sign-in first rather than watching every line fail.
+        """
+        if not self.auth.authorised and not self.sign_in():
+            return
+        dlg = FinderDialog(self.spotify, self)
+        dlg.send_to_playlist.connect(self._absorb_found)
+        dlg.exec()
+
+    def _absorb_found(self, tracks: list):
+        """Append resolved tracks, then look up BPM/key for them.
+
+        The lookup runs on the *resolved* title and artist rather than the line
+        the user pasted — that metadata is canonical and matches far better.
+        """
+        if not tracks:
+            return
+        self.snapshot()
+        for t in tracks:
+            if not t.resolved:
+                self.store.apply_cache(t) if self.store else None
+            self.tracks.append(t)
+        self.refresh()
+        self.status("Added %d tracks from the finder — fetching BPM/key." % len(tracks))
+        QTimer.singleShot(0, self.fetch_features)
 
     def sign_in(self) -> bool:
         """Returns True once a refresh token is held."""

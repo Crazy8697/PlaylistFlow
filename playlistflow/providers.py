@@ -22,6 +22,18 @@ class ProviderError(RuntimeError):
     pass
 
 
+class RateLimited(ProviderError):
+    """429. Carries Spotify's Retry-After so the caller can pace itself.
+
+    Raised rather than slept on here: the search worker owns the pacing so the
+    wait stays cancellable.
+    """
+
+    def __init__(self, retry_after: float):
+        super().__init__(f"Spotify rate limit — waiting {retry_after:.0f}s")
+        self.retry_after = retry_after
+
+
 # --------------------------------------------------------------------------
 # Spotify
 # --------------------------------------------------------------------------
@@ -129,6 +141,36 @@ class Spotify:
             url = j.get("next")
             params = None
         return out
+
+    # ---------------- search ----------------
+
+    def search_tracks(self, q: str, limit: int = 5, market: str = "US") -> list[dict]:
+        """Track search. Works on the user token the app already holds.
+
+        Unlike audio_features and playlist items, search has no identity
+        requirement, so nothing extra had to be arranged for it.
+
+        Params go through requests' encoder rather than an f-string: queries
+        carry ampersands, apostrophes and quotes ("Stop & Stare", "Still
+        Ragin'", 'track:"..."') that must not land raw in the URL.
+        """
+        r = self._s.get(
+            f"{SPOTIFY_API}/search",
+            headers={"Authorization": f"Bearer {self._auth()}"},
+            params={"q": q, "type": "track", "limit": limit, "market": market},
+            timeout=20,
+        )
+        if r.status_code == 429:
+            try:
+                wait = float(r.headers.get("Retry-After", "2"))
+            except ValueError:
+                wait = 2.0
+            raise RateLimited(wait)
+        if r.status_code == 401:
+            raise ProviderError("Spotify sign-in expired — sign in again.")
+        if r.status_code != 200:
+            raise ProviderError(f"Spotify returned {r.status_code} for that search.")
+        return (r.json().get("tracks") or {}).get("items") or []
 
     # ---------------- playback ----------------
     #

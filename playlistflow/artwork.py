@@ -1,106 +1,129 @@
-"""The wave, drawn in code.
+"""The app artwork.
 
-Lives in the package rather than in the icon script because the app draws it
-too — faintly, behind the About dialog. One definition, so the icon and the
-artwork can never drift apart.
+Was drawn in code; it is now two supplied illustrations:
 
-It has to stay legible at 16px, which rules out fine detail: warm sky, deep
-water, one heavy curl, foam, spray.
+    assets/icon_source.png   the icon — flat ground, one heavy curl, notes
+    assets/about_source.png  the fuller scene, used behind the About dialog
+
+Both are loaded once and cached. Scaling happens per requested size, because
+Windows asks for everything from 16px to 256px and a smooth downscale of the
+1024px original beats re-decoding the file each time.
 """
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QRectF, QPointF
-from PySide6.QtGui import (QPainter, QColor, QPen, QBrush, QPixmap,
-                           QPainterPath, QLinearGradient)
+import sys
+from pathlib import Path
 
-SKY_HI = QColor("#F0A03A")     # low sun
-SKY_LO = QColor("#D8562F")     # burnt orange near the horizon
-DEEP = QColor("#12325E")       # trough
-MID = QColor("#1E63A8")        # wave body
-LIGHT = QColor("#3FA8D9")      # lit face
-FOAM = QColor("#EAF4FB")
+from PySide6.QtCore import Qt, QRectF
+from PySide6.QtGui import QImage, QPainter, QPainterPath, QPixmap
+
+ICON_SRC = "icon_source.png"
+ABOUT_SRC = "about_source.png"
+
+_cache: dict[str, QImage] = {}
+_scaled: dict[tuple, QPixmap] = {}
 
 
-def paint_wave(p: QPainter, size: float, rounded: bool = True,
-               sky: bool = True) -> None:
-    """Draw the wave into `p`, filling a `size` square at the origin."""
+def asset_path(name: str) -> Path | None:
+    """Find an asset from source or from a frozen build.
+
+    PyInstaller 6 unpacks --add-data under _internal/ (sys._MEIPASS) rather
+    than beside the exe, so that is checked first — same order main.py uses to
+    find the window icon.
+    """
+    bases = []
+    meipass = getattr(sys, "_MEIPASS", "")
+    if meipass:
+        bases.append(Path(meipass))
+    here = Path(__file__).resolve().parent
+    bases += [here.parent, here.parent / "_internal", here]
+    if getattr(sys, "frozen", False):
+        exe = Path(sys.executable).parent
+        bases += [exe, exe / "_internal"]
+    for base in bases:
+        for rel in ("assets/" + name, name):
+            p = base / rel
+            if p.exists():
+                return p
+    return None
+
+
+def _image(name: str) -> QImage:
+    if name not in _cache:
+        p = asset_path(name)
+        _cache[name] = QImage(str(p)) if p else QImage()
+    return _cache[name]
+
+
+def _rounded(pm: QPixmap, radius_frac: float) -> QPixmap:
+    """Clip to a rounded square. Only used where the platform expects it."""
+    out = QPixmap(pm.size())
+    out.fill(Qt.transparent)
+    p = QPainter(out)
     p.setRenderHint(QPainter.Antialiasing, True)
-    s = size / 64.0
+    p.setRenderHint(QPainter.SmoothPixmapTransform, True)
+    path = QPainterPath()
+    r = pm.width() * radius_frac
+    path.addRoundedRect(QRectF(0, 0, pm.width(), pm.height()), r, r)
+    p.setClipPath(path)
+    p.drawPixmap(0, 0, pm)
+    p.end()
+    return out
 
-    def P(x, y):
-        return QPointF(x * s, y * s)
 
-    if rounded:
-        tile = QPainterPath()
-        tile.addRoundedRect(QRectF(0, 0, size, size), 12 * s, 12 * s)
-        p.setClipPath(tile)
+def icon_pixmap(size: int, rounded: bool = False) -> QPixmap:
+    """The icon at `size`, square.
 
-    if sky:
-        grad = QLinearGradient(0, 0, 0, size)
-        grad.setColorAt(0.0, SKY_HI)
-        grad.setColorAt(1.0, SKY_LO)
-        p.fillRect(QRectF(0, 0, size, size), QBrush(grad))
+    Left square by default: the illustration is full-bleed and composed to the
+    frame, so rounding it crops the ground colour rather than softening a
+    silhouette.
+    """
+    key = ("icon", size, rounded)
+    if key in _scaled:
+        return _scaled[key]
+    img = _image(ICON_SRC)
+    if img.isNull():
+        pm = QPixmap(size, size)
+        pm.fill(Qt.transparent)
+    else:
+        pm = QPixmap.fromImage(
+            img.scaled(size, size, Qt.KeepAspectRatioByExpanding,
+                       Qt.SmoothTransformation))
+        if pm.width() != size or pm.height() != size:
+            # Centre-crop anything the aspect expansion overshot.
+            x = max(0, (pm.width() - size) // 2)
+            y = max(0, (pm.height() - size) // 2)
+            pm = pm.copy(x, y, size, size)
+        if rounded:
+            pm = _rounded(pm, 0.1875)
+    _scaled[key] = pm
+    return pm
 
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor(255, 226, 160, 210))
-        p.drawEllipse(P(46, 26), 9 * s, 9 * s)
 
-    # Deep water across the bottom.
-    water = QPainterPath()
-    water.moveTo(P(0, 44))
-    water.cubicTo(P(12, 42), P(20, 50), P(32, 50))
-    water.cubicTo(P(44, 50), P(54, 44), P(64, 46))
-    water.lineTo(P(64, 64))
-    water.lineTo(P(0, 64))
-    water.closeSubpath()
-    p.setPen(Qt.NoPen)
-    p.setBrush(QBrush(DEEP))
-    p.drawPath(water)
-
-    # The curl is a very thick stroked spiral rather than an outlined shape.
-    # Filled outlines came out thin enough to read as a hook; a heavy
-    # round-capped stroke gives the water mass, and survives 16px.
-    spiral = QPainterPath()
-    spiral.moveTo(P(4, 50))
-    spiral.cubicTo(P(12, 44), P(16, 30), P(26, 20))     # flank rising
-    spiral.cubicTo(P(36, 10), P(50, 12), P(51, 24))     # over the top
-    spiral.cubicTo(P(52, 33), P(43, 37), P(38, 31))     # curling back down
-    spiral.cubicTo(P(35, 27), P(38, 22), P(42, 24))     # into the tube
-
-    body = QLinearGradient(0, size, size * 0.85, 0)
-    body.setColorAt(0.0, DEEP)
-    body.setColorAt(0.5, MID)
-    body.setColorAt(1.0, LIGHT)
-    pen = QPen(QBrush(body), 13 * s)
-    pen.setCapStyle(Qt.RoundCap)
-    pen.setJoinStyle(Qt.RoundJoin)
-    p.setPen(pen)
-    p.setBrush(Qt.NoBrush)
-    p.drawPath(spiral)
-
-    # Foam riding the outer edge of the same curl.
-    foam = QPainterPath()
-    foam.moveTo(P(6, 44))
-    foam.cubicTo(P(14, 38), P(18, 25), P(27, 15))
-    foam.cubicTo(P(37, 5), P(56, 9), P(57, 24))
-    foam.cubicTo(P(58, 34), P(50, 41), P(42, 39))
-    pen = QPen(FOAM, 4.2 * s)
-    pen.setCapStyle(Qt.RoundCap)
-    p.setPen(pen)
-    p.drawPath(foam)
-
-    # Spray off the lip.
-    p.setPen(Qt.NoPen)
-    p.setBrush(FOAM)
-    for x, y, r in ((36, 41, 2.6), (30, 45, 1.7), (57, 33, 1.9), (24, 47, 1.2)):
-        p.drawEllipse(P(x, y), r * s, r * s)
+def about_pixmap(width: int, height: int) -> QPixmap:
+    """The fuller scene, cropped to cover a `width` x `height` panel."""
+    key = ("about", width, height)
+    if key in _scaled:
+        return _scaled[key]
+    img = _image(ABOUT_SRC)
+    if img.isNull():
+        pm = QPixmap(width, height)
+        pm.fill(Qt.transparent)
+    else:
+        scaled = img.scaled(width, height, Qt.KeepAspectRatioByExpanding,
+                            Qt.SmoothTransformation)
+        x = max(0, (scaled.width() - width) // 2)
+        y = max(0, (scaled.height() - height) // 2)
+        pm = QPixmap.fromImage(scaled.copy(x, y, width, height))
+    _scaled[key] = pm
+    return pm
 
 
 def wave_pixmap(size: int, rounded: bool = True, sky: bool = True) -> QPixmap:
-    pm = QPixmap(size, size)
-    pm.fill(Qt.transparent)
-    p = QPainter(pm)
-    paint_wave(p, size, rounded=rounded, sky=sky)
-    p.end()
-    return pm
+    """Kept for callers written against the drawn version.
+
+    `sky` no longer means anything — the illustration carries its own — but the
+    signature stays so makeicon.py and anything else keeps working.
+    """
+    return icon_pixmap(size, rounded=False)

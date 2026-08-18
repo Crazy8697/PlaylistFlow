@@ -15,6 +15,8 @@ __pycache__/
 
 # Generated icons (rebuild with makeicon.py)
 assets/icon_*.png
+# ...but the artwork they are generated FROM is source, not output.
+!assets/icon_source.png
 
 # Scratch
 *.log
