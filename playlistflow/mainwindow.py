@@ -1625,10 +1625,10 @@ class MainWindow(QMainWindow):
         only_here = [u for u in target if u not in cur]
 
         if only_there:
-            # Removal is not wired up: DELETE /playlists/{id}/items answers
-            # "No uris provided" for every documented body shape, and the old
-            # /tracks path is 403. Until that is resolved, say what to do
-            # instead of offering a button that 400s.
+            # Tracks on Spotify this window has dropped. Destructive, so it
+            # defaults to No and names what it will delete -- these are by
+            # definition not in this window, so the titles have to be looked
+            # up rather than approving a bare base-62 id.
             try:
                 names = self.spotify.track_names(sorted(only_there)[:50])
             except (ProviderError, AuthError):
@@ -1638,16 +1638,30 @@ class MainWindow(QMainWindow):
             listing = ", ".join(shown)
             if len(only_there) > 3:
                 listing += ", and %d more" % (len(only_there) - 3)
-            QMessageBox.warning(
+            if QMessageBox.question(
                 self, "Push order",
                 f"{len(only_there)} track(s) on Spotify are not in this window:"
                 "\n\n"
                 f"{listing}"
                 "\n\n"
-                "Spotify's API is currently rejecting removals, so this "
-                "cannot delete them for you. Remove them in the Spotify app, "
-                "then sync and push again.")
-            return
+                f"Remove them from '{self.current_name}' on Spotify, then "
+                f"reorder the remaining {len(target)}?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+            ) != QMessageBox.Yes:
+                self.status("Nothing pushed.")
+                return
+            self.busy_on("Removing tracks...")
+            try:
+                n = self.spotify.remove_items(
+                    self.current_pid, sorted(only_there),
+                    progress=lambda a, t: self.status(f"Removed {a} of {t}..."))
+            except (ProviderError, AuthError) as e:
+                QMessageBox.warning(self, "Push order", str(e))
+                self.status(str(e))
+                return
+            finally:
+                self.busy_off()
+            self.status(f"Removed {n} track(s) from '{self.current_name}'.")
 
         if only_here:
             # The normal case after using the finder: this window holds tracks

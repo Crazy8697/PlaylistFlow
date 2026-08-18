@@ -315,8 +315,15 @@ class Spotify:
     def remove_items(self, pid: str, uris: list, progress=None) -> int:
         """Remove tracks from a playlist. Returns how many were removed.
 
-        DELETE /playlists/{id}/items, body {"tracks": [{"uri": ...}]} -- the
-        same rename as the rest; DELETE /tracks answers 403. 100 per request.
+        DELETE /playlists/{id}/items, body {"items": [{"uri": ...}]}.
+
+        The February 2026 rename hit the body as well as the path: the parameter
+        went from "tracks" to "items". It still takes OBJECTS with a "uri" key,
+        not bare strings -- a list of strings answers "Invalid base62 id".
+        Everything else ("tracks", "uris", query parameters) answers 400
+        "No uris provided", which is emitted for any unrecognised body and so
+        says nothing about whether the endpoint or the shape is at fault.
+        100 per request; DELETE /tracks is 403.
 
         Removes every occurrence of each uri. Destructive, so the caller is
         expected to have confirmed it explicitly.
@@ -328,7 +335,7 @@ class Spotify:
                 "DELETE",
                 f"{SPOTIFY_API}/playlists/{pid}/items",
                 headers={"Authorization": f"Bearer {self._auth()}"},
-                json={"tracks": [{"uri": u} for u in chunk]},
+                json={"items": [{"uri": u} for u in chunk]},
                 timeout=30,
             )
             if r.status_code == 429:
