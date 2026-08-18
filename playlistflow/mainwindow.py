@@ -1598,15 +1598,70 @@ class MainWindow(QMainWindow):
             return
         if not self.auth.authorised and not self.sign_in():
             return
-        if QMessageBox.question(
+
+        target = [t.uri for t in self.tracks]
+        if len(set(target)) != len(target):
+            QMessageBox.warning(
+                self, "Push order",
+                "This window lists the same track more than once, which Spotify "
+                "cannot be reordered to match. Remove the repeats and push again.")
+            return
+
+        # Reordering refuses unless both sides hold the same set, so work out
+        # which way they differ before asking for anything.
+        self.busy_on("Checking Spotify...")
+        try:
+            current = self.spotify.playlist_uris(self.current_pid)
+        except (ProviderError, AuthError) as e:
+            QMessageBox.warning(self, "Push order", str(e))
+            self.status(str(e))
+            return
+        finally:
+            self.busy_off()
+
+        cur = set(current)
+        only_there = cur - set(target)
+        only_here = [u for u in target if u not in cur]
+
+        if only_there:
+            # Tracks on Spotify that this window has dropped. Removing them is a
+            # different, destructive intent, and not something to infer.
+            QMessageBox.warning(
+                self, "Push order",
+                f"{len(only_there)} track(s) on Spotify are not in this window. "
+                "Pushing would have to remove them, which this does not do. "
+                "Reload the playlist, redo your order, then push.")
+            return
+
+        if only_here:
+            # The normal case after using the finder: this window holds tracks
+            # Spotify has never seen.
+            if QMessageBox.question(
+                self, "Push order",
+                f"{len(only_here)} track(s) here are not on Spotify yet."
+                "\n\n"
+                f"Add them to '{self.current_name}', then reorder all "
+                f"{len(target)} to match this window?"
+            ) != QMessageBox.Yes:
+                return
+            self.busy_on("Adding tracks...")
+            try:
+                n = self.spotify.add_items(
+                    self.current_pid, only_here,
+                    progress=lambda a, t: self.status(f"Added {a} of {t}..."))
+            except (ProviderError, AuthError) as e:
+                QMessageBox.warning(self, "Push order", str(e))
+                self.status(str(e))
+                return
+            finally:
+                self.busy_off()
+            self.status(f"Added {n} track(s) to '{self.current_name}'.")
+        elif QMessageBox.question(
             self, "Push order",
-            f"Reorder '{self.current_name}' on Spotify to match this window?\n\n"
-            f"{len(self.tracks)} tracks. Nothing is added or removed — tracks "
-            f"are moved, so dates added are preserved."
+            f"Reorder '{self.current_name}' on Spotify to match this window?"
         ) != QMessageBox.Yes:
             return
 
-        target = [t.uri for t in self.tracks]
         self.busy_on("Pushing order…")
         try:
             moves = self.spotify.reorder_playlist(

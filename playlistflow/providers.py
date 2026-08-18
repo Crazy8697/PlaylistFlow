@@ -249,6 +249,39 @@ class Spotify:
     def playlist_uris(self, pid: str) -> list[str]:
         return [t.uri for t in self.playlist_tracks(pid)]
 
+    def add_items(self, pid: str, uris: list, progress=None) -> int:
+        """Append tracks to a playlist. Returns how many were added.
+
+        POST /playlists/{id}/items — the same February 2026 rename that hit the
+        GET path; POST /tracks answers 403. Spotify caps a request at 100 uris.
+
+        Appends only. Placing them correctly is the reorder step's job, which
+        keeps every existing track's "date added" intact.
+        """
+        added = 0
+        for start in range(0, len(uris), 100):
+            chunk = uris[start:start + 100]
+            r = self._s.post(
+                f"{SPOTIFY_API}/playlists/{pid}/items",
+                headers={"Authorization": f"Bearer {self._auth()}"},
+                json={"uris": chunk},
+                timeout=30,
+            )
+            if r.status_code == 429:
+                raise ProviderError(
+                    f"Spotify rate limit after adding {added} track(s). "
+                    "Wait a minute and try again."
+                )
+            if r.status_code not in (200, 201):
+                raise ProviderError(
+                    f"Spotify refused to add tracks ({r.status_code}) after "
+                    f"{added} successful one(s): {r.text[:120]}"
+                )
+            added += len(chunk)
+            if progress:
+                progress(added, len(uris))
+        return added
+
     def reorder_playlist(self, pid: str, target: list[str], progress=None) -> int:
         """Permute the playlist into `target` order using move operations.
 
