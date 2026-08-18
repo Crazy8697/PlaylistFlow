@@ -53,7 +53,8 @@ class Store:
         return sorted(names, key=str.lower)
 
     def save(self, name: str, tracks: list[Track], auto: bool = False,
-             pid: str = "", description: str = "") -> Path:
+             pid: str = "", description: str = "",
+             ear_checked: list | None = None) -> Path:
         manual_p, auto_p = self._paths(name)
         target = auto_p if auto else manual_p
         payload = {
@@ -65,6 +66,9 @@ class Store:
             # The user's note about what the set is for; shown while working so
             # a track can be judged against the intent, not just the key.
             "description": description,
+            # seam_key() ids of transitions the user has listened to and
+            # approved -- pair-keyed, so they survive reordering.
+            "ear_checked": sorted(ear_checked or []),
             "tracks": [t.to_dict() for t in tracks],
         }
         tmp = target.with_suffix(".tmp")
@@ -86,7 +90,13 @@ class Store:
         data = json.loads(pick.read_text(encoding="utf-8"))
         self._last_pid = data.get("spotify_id", "") or ""
         self._last_desc = data.get("description", "") or ""
+        self._last_checked = data.get("ear_checked", []) or []
         return [Track.from_dict(d) for d in data.get("tracks", [])]
+
+    @property
+    def last_loaded_checked(self) -> list:
+        """Ear-checked seam ids of the most recent load()."""
+        return list(getattr(self, "_last_checked", []))
 
     @property
     def last_loaded_desc(self) -> str:

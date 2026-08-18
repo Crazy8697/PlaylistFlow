@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QRadioButton, QComboBox, QButtonGroup,
 )
 
-from .domain import Track, seams, summary, valid_key, felt_bpm
+from .domain import Track, seams, summary, valid_key, felt_bpm, seam_key
 from .providers import Spotify, FreqBlog, GetSongBPM, ProviderError, Features
 from .auth import SpotifyAuth, AuthError
 from .keys import clean_title, primary_artist
@@ -448,6 +448,8 @@ class MainWindow(QMainWindow):
         self.current_pid = ""          # Spotify playlist id, when it came from there
         self.current_desc = ""
         self.current_image = ""
+        # seam_key() ids the user has listened to and approved
+        self.approved: set = set()
         self.worker: FetchWorker | None = None
         self.wheel: KeyWheelDialog | None = None
         self._refreshing_spotify = False
@@ -668,6 +670,7 @@ class MainWindow(QMainWindow):
         self.table.previewRequested.connect(self.preview_row)
         self.table.crossCheckRequested.connect(self.cross_check)
         self.table.copyRequested.connect(self.copy_tracks)
+        self.table.earCheckToggled.connect(self.toggle_ear_check)
         self.table.edited.connect(self.edit_cell)
         self.table.deleteRequested.connect(self.delete_rows)
         self.table.itemSelectionChanged.connect(self._sync_selection)
@@ -809,6 +812,7 @@ class MainWindow(QMainWindow):
             ("Move track up", "Ctrl+Up", lambda: self._nudge(-1)),
             ("Move track down", "Ctrl+Down", lambda: self._nudge(1)),
             ("Next missing BPM/key", "Ctrl+B", self.jump_next_blank),
+            ("Ear-check selected transition", "Ctrl+M", self.ear_check_selected),
             ("Preview transition", "Ctrl+P",
              lambda: self.preview_transition(self.player.tail.value())),
             ("Play / pause", "Space", self._space),
@@ -838,6 +842,7 @@ class MainWindow(QMainWindow):
         add("Ctrl+Up", lambda: self._nudge(-1))
         add("Ctrl+Down", lambda: self._nudge(1))
         add("Ctrl+B", self.jump_next_blank)
+        add("Ctrl+M", self.ear_check_selected)
         add("Ctrl+P", lambda: self.preview_transition(self.player.tail.value()))
         add("Ctrl+F", self.fetch_features)
         add("Ctrl+Shift+F", self.bulk_finder)
@@ -1011,6 +1016,7 @@ class MainWindow(QMainWindow):
         self.tracks = self.store.load(name)
         self.current_pid = self.store.last_loaded_pid
         self.current_desc = self.store.last_loaded_desc
+        self.approved = set(self.store.last_loaded_checked)
         self.current_name = name
         self.refresh()
         self.load_details()
@@ -1063,14 +1069,16 @@ class MainWindow(QMainWindow):
             name = name.strip()
         self.current_name = name
         self.store.save(name, self.tracks, auto=False, pid=self.current_pid,
-                        description=self.current_desc)
+                        description=self.current_desc,
+                        ear_checked=sorted(self.approved))
         self.refresh_saved()
         self.status(f"Saved {name}.")
 
     def _write_auto(self):
         if self.store and self.current_name and self.tracks:
             self.store.save(self.current_name, self.tracks, auto=True,
-                            pid=self.current_pid, description=self.current_desc)
+                            pid=self.current_pid, description=self.current_desc,
+                            ear_checked=sorted(self.approved))
 
     # ---------------- undo ----------------
 
@@ -1262,6 +1270,7 @@ class MainWindow(QMainWindow):
             self.tracks.append(t)
         self.current_pid = pid
         self.current_name = name or "Untitled playlist"
+        self.approved = set()
         self.refresh()
         self.load_details()
         cached = sum(1 for t in self.tracks if t.resolved)
@@ -1320,6 +1329,7 @@ class MainWindow(QMainWindow):
             if how == "existing":
                 self.tracks = self.store.load(name)
                 self.current_pid = self.store.last_loaded_pid
+                self.approved = set(self.store.last_loaded_checked)
             else:
                 self.current_pid = ""
             self.current_name = name
@@ -1341,7 +1351,8 @@ class MainWindow(QMainWindow):
         self.refresh()
         if self.store and self.current_name:
             self.store.save(self.current_name, self.tracks, auto=False,
-                            pid=self.current_pid, description=self.current_desc)
+                            pid=self.current_pid, description=self.current_desc,
+                            ear_checked=sorted(self.approved))
             self.refresh_saved()
         msg = "Added %d tracks to %s" % (len(fresh), self.current_name or "the playlist")
         if skipped:
@@ -1424,7 +1435,7 @@ class MainWindow(QMainWindow):
         # Update the counts immediately — that is the number being watched —
         # but coalesce the expensive full table rebuild, or 49 results in quick
         # succession starve the repaint and nothing appears to move.
-        self.stat.setText(summary(self.tracks))
+        self.stat.setText(summary(self.tracks, self.approved))
         self.show_playlist_info()
         self._live.start()
 
@@ -1780,7 +1791,7 @@ class MainWindow(QMainWindow):
             return
         start = max(0, a.duration_ms - tail_s * 1000)
         self._player_do("play", ([a.uri, b.uri], start, ""))
-        sm = seams(self.tracks)
+        sm = seams(self.tracks, self.approved)
         s = sm[i] if i < len(sm) else None
         detail = f"  ({s.key.txt}, {s.tempo.txt})" if s and s.known else ""
         self.status(f"Last {tail_s}s of '{a.title}' → '{b.title}'{detail}")
@@ -1819,6 +1830,31 @@ class MainWindow(QMainWindow):
             duration_ms=item.get("duration_ms") or 0,
             art_url=art,
         )
+
+    def toggle_ear_check(self, row: int):
+        """Flip the listened-and-approved mark on the seam row -> row+1.
+
+        Pair-keyed rather than index-keyed, so the mark follows the two tracks:
+        it survives reordering elsewhere and vanishes if something is dragged
+        in between -- a new neighbour is a new, unheard transition.
+        """
+        if not (0 <= row < len(self.tracks) - 1):
+            self.status("That is the last track - no transition after it.")
+            return
+        key = seam_key(self.tracks[row], self.tracks[row + 1])
+        a, b = self.tracks[row].title, self.tracks[row + 1].title
+        if key in self.approved:
+            self.approved.discard(key)
+            self.status(f"Unmarked '{a}' -> '{b}'.")
+        else:
+            self.approved.add(key)
+            self.status(f"Ear-checked '{a}' -> '{b}'.")
+        self.refresh(keep_undo=True)
+
+    def ear_check_selected(self):
+        rows = sorted({i.row() for i in self.table.selectedIndexes()})
+        if rows:
+            self.toggle_ear_check(rows[0])
 
     def copy_tracks(self, rows: list):
         """Copy the selected tracks as "Artist - Title", one per line.
@@ -1936,7 +1972,7 @@ class MainWindow(QMainWindow):
     # ---------------- render ----------------
 
     def refresh(self, keep_undo: bool = False):
-        sm = seams(self.tracks)
+        sm = seams(self.tracks, self.approved)
         rows = sorted({i.row() for i in self.table.selectedIndexes()})
         sel = rows[0] if rows else -1
         self.table.set_data(self.tracks, sm, self.felt)

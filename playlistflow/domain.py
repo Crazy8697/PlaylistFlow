@@ -154,32 +154,53 @@ def tempo_rel(a: Track, b: Track) -> Rel:
     return Rel("jumps", C_BAD, True)
 
 
+def seam_key(a: Track, b: Track) -> str:
+    """Stable identity for the transition a -> b.
+
+    Keyed on the tracks, not the row number, so an ear-check survives
+    reordering elsewhere in the list and correctly disappears the moment a
+    different track is dragged in between.
+    """
+    def one(t: Track) -> str:
+        return t.uri or f"{t.artist.strip().lower()}|{t.title.strip().lower()}"
+    return one(a) + " >> " + one(b)
+
+
 @dataclass
 class Seam:
     key: Rel
     tempo: Rel
     both: bool
     known: bool = True   # False when either side has no BPM/key yet
+    checked: bool = False   # the user listened to this transition and approved it
 
 
-def seams(tracks: list[Track]) -> list[Seam]:
+def seams(tracks: list[Track], approved=None) -> list[Seam]:
     """One seam per adjacent pair. Key and tempo are evaluated independently;
-    only 'both off' is a hard warning — one axis off is survivable."""
+    only 'both off' is a hard warning — one axis off is survivable.
+
+    `approved` is the set of seam_key() ids the user has ear-checked. An
+    ear-check is allowed on an unresolved seam too — listening outranks
+    numbers that have not arrived yet.
+    """
+    approved = approved or frozenset()
     out: list[Seam] = []
     for i in range(len(tracks) - 1):
         a, b = tracks[i], tracks[i + 1]
+        ok = seam_key(a, b) in approved
         if not (a.resolved and b.resolved):
             out.append(Seam(Rel("—", "#5C636D", False),
-                            Rel("—", "#5C636D", False), False, known=False))
+                            Rel("—", "#5C636D", False), False, known=False,
+                            checked=ok))
             continue
         k = key_label(key_gap(a, b))
         t = tempo_rel(a, b)
-        out.append(Seam(k, t, k.bad and t.bad, known=True))
+        out.append(Seam(k, t, k.bad and t.bad, known=True, checked=ok))
     return out
 
 
-def summary(tracks: list[Track]) -> str:
-    sm = seams(tracks)
+def summary(tracks: list[Track], approved=None) -> str:
+    sm = seams(tracks, approved)
     # A seam nobody can judge yet is not a clean seam.
     judged = [s for s in sm if s.known]
     clean = sum(1 for s in judged if not s.key.bad and not s.tempo.bad)
@@ -192,4 +213,7 @@ def summary(tracks: list[Track]) -> str:
         bits.append(f"{unresolved} need BPM/key")
     if judged:
         bits += [f"{clean} clean", f"{both} off on both"]
+    checked = sum(1 for s in sm if s.checked)
+    if checked:
+        bits.append(f"{checked} ear-checked")
     return "  ·  ".join(bits)

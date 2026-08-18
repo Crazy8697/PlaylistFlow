@@ -41,6 +41,7 @@ UNVERIFIED_BG_ALT = QColor("#2D2921")
 SELECTED_BG = QColor("#2C3440")
 ROW_LINE = QColor("#22262E")
 DROP_LINE = QColor("#3FBFA8")
+OKGREEN = QColor("#5FBF6B")
 PLAYING_BG = QColor("#173029")
 PLAYING_EDGE = QColor("#3FBFA8")
 
@@ -147,6 +148,7 @@ class TrackTable(QTableWidget):
     previewRequested = Signal(int)      # row
     crossCheckRequested = Signal(int)   # row
     copyRequested = Signal(list)        # rows -> "Artist - Title"
+    earCheckToggled = Signal(int)       # row: seam into the NEXT track
 
     def __init__(self, parent=None):
         super().__init__(0, len(HEADERS), parent)
@@ -205,6 +207,12 @@ class TrackTable(QTableWidget):
         m.addSeparator()
         a = m.addAction("Cross-check BPM && key on the web")
         a.triggered.connect(lambda: self.crossCheckRequested.emit(row))
+        a = m.addAction("Unmark ear-checked transition"
+                        if row < len(self._seams) and self._seams[row].checked
+                        else "Mark transition into next as ear-checked")
+        a.setEnabled(row + 1 < len(self._tracks))
+        a.triggered.connect(lambda: self.earCheckToggled.emit(row))
+        m.addSeparator()
         a = m.addAction("Copy artist - title")
         a.triggered.connect(lambda: self.copyRequested.emit(self._sel_rows(row)))
         m.addSeparator()
@@ -463,6 +471,14 @@ class TrackTable(QTableWidget):
             if s.both:
                 p.setPen(QPen(BAD))
                 p.drawText(x, y, "← both off")
+
+            if s.checked:
+                # The user has listened to this seam and signed off on it.
+                # Right-aligned so it never collides with the readout text.
+                mark = "✓ ear-checked"
+                p.setPen(QPen(OKGREEN))
+                p.drawText(self.viewport().width() - fm.horizontalAdvance(mark) - 18,
+                           y, mark)
 
         self._paint_drop_line(p)
         p.end()
