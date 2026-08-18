@@ -108,6 +108,31 @@ class Store:
         """Spotify playlist id of the most recent load(), if it had one."""
         return getattr(self, "_last_pid", "")
 
+    def meta(self, name: str) -> dict:
+        """Description and ear-checks of a saved playlist, without loading it.
+
+        Same file preference as load(). Used when a playlist is re-fetched from
+        Spotify: the track list comes from the API, but the ear-checks only
+        exist locally, and being pair-keyed they apply cleanly to the fresh
+        list -- pairs that no longer exist simply match nothing.
+        """
+        manual_p, auto_p = self._paths(name)
+        pick = None
+        if auto_p.exists() and manual_p.exists():
+            pick = auto_p if auto_p.stat().st_mtime > manual_p.stat().st_mtime else manual_p
+        else:
+            pick = auto_p if auto_p.exists() else manual_p
+        if not pick.exists():
+            return {}
+        try:
+            data = json.loads(pick.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return {
+            "description": data.get("description", "") or "",
+            "ear_checked": data.get("ear_checked", []) or [],
+        }
+
     def has_newer_auto(self, name: str) -> bool:
         manual_p, auto_p = self._paths(name)
         if not auto_p.exists():

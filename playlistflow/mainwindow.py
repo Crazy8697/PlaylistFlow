@@ -1270,7 +1270,11 @@ class MainWindow(QMainWindow):
             self.tracks.append(t)
         self.current_pid = pid
         self.current_name = name or "Untitled playlist"
-        self.approved = set()
+        # Ear-checks live only in the local save -- a Spotify fetch knows
+        # nothing about them. Pull them back in whenever a save by this name
+        # exists; pair-keying means they fit the fresh list safely.
+        meta = self.store.meta(self.current_name) if self.store else {}
+        self.approved = set(meta.get("ear_checked", []))
         self.refresh()
         self.load_details()
         cached = sum(1 for t in self.tracks if t.resolved)

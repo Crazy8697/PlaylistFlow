@@ -62,3 +62,14 @@ print("table seams:", len(w.table._seams), "rows", len(w.tracks))
 w.prefs.storage_dir = _real
 shutil.rmtree(tmp, ignore_errors=True)
 print("done, prefs restored")
+
+# 7. Spotify-load path restores from local meta (the close/reopen bug)
+import tempfile as _tf
+tmp2 = _tf.mkdtemp(prefix="pfear2")
+st2 = Store(tmp2)
+st2.save("Ache2", [mk("X", "One"), mk("Y", "Two")], auto=False,
+         ear_checked=["spotify:track:X >> spotify:track:Y"])
+m = st2.meta("Ache2")
+print("meta round-trip:", m.get("ear_checked") == ["spotify:track:X >> spotify:track:Y"])
+print("meta missing   :", st2.meta("Nope") == {})
+shutil.rmtree(tmp2, ignore_errors=True)
