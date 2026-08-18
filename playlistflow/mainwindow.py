@@ -38,7 +38,7 @@ from .websearch import BraveLookup
 from .finderdialog import FinderDialog
 
 UNDO_CAP = 40
-COVER = 84                 # playlist cover in the bottom strip
+COVER = 76                 # playlist cover in the bottom strip
 AUTOSAVE_MS = 1500
 
 
@@ -697,28 +697,32 @@ class MainWindow(QMainWindow):
 
         meta = QVBoxLayout()
         meta.setSpacing(4)
+
+        # Name and Save share a line above the box they act on, rather than
+        # the button floating in a column of its own beside everything.
+        head_row = QHBoxLayout()
+        head_row.setSpacing(8)
         self.pl_name = QLabel("No playlist open")
         self.pl_name.setObjectName("plname")
-        meta.addWidget(self.pl_name)
-        self.pl_desc = QPlainTextEdit()
-        self.pl_desc.setPlaceholderText("Add an optional description")
-        self.pl_desc.setMaximumHeight(52)
-        self.pl_desc.setTabChangesFocus(True)
-        meta.addWidget(self.pl_desc)
-        il.addLayout(meta, 1)
-
-        side_btns = QVBoxLayout()
-        side_btns.setSpacing(4)
+        head_row.addWidget(self.pl_name)
+        head_row.addStretch(1)
         self.btn_desc = QPushButton("Save description")
         self.btn_desc.setToolTip(
             "Write the description back to the Spotify playlist." "\n"
             "Saved with the local playlist either way.")
-        self.btn_desc.setIcon(spotify_icon(15))
-        self.btn_desc.setIconSize(icon_size(15))
+        self.btn_desc.setIcon(spotify_icon(13))
+        self.btn_desc.setIconSize(icon_size(13))
+        self.btn_desc.setFixedHeight(22)
         self.btn_desc.clicked.connect(self.save_description)
-        side_btns.addWidget(self.btn_desc)
-        side_btns.addStretch(1)
-        il.addLayout(side_btns)
+        head_row.addWidget(self.btn_desc)
+        meta.addLayout(head_row)
+
+        self.pl_desc = QPlainTextEdit()
+        self.pl_desc.setPlaceholderText("Add an optional description")
+        self.pl_desc.setMaximumHeight(46)
+        self.pl_desc.setTabChangesFocus(True)
+        meta.addWidget(self.pl_desc)
+        il.addLayout(meta, 1)
 
         # Deliberately NOT in the splitter: this is reference material to judge
         # tracks against while working, so it must not be draggable shut.
