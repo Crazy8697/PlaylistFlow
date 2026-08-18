@@ -16,7 +16,10 @@ from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QPushButton, QLabel, QSlider, QSpinBox,
 )
 
+from .artwork import remote_pixmap
+
 PREVIEW_TAIL_DEFAULT = 20      # seconds of the outgoing track
+ART = 44                       # now-playing cover, square
 
 
 def ms_to_clock(ms: int) -> str:
@@ -41,6 +44,15 @@ class PlayerBar(QWidget):
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(8)
+
+        # Cover of whatever is playing. Decorative, but it also makes it
+        # obvious at a glance that the transport is bound to a live device.
+        self.art = QLabel()
+        self.art.setFixedSize(ART, ART)
+        self.art.setObjectName("art")
+        self.art.setScaledContents(False)
+        lay.addWidget(self.art)
+        self._art_url = ""
 
         self.btn_prev = QPushButton("◀◀")
         self.btn_prev.setFixedWidth(44)
@@ -100,8 +112,21 @@ class PlayerBar(QWidget):
             self.seekRequested.emit(
                 int(self._duration * self.bar.value() / 1000))
 
+    def set_art(self, url: str):
+        """Only touches the pixmap when the URL actually changes -- this is
+        called on a two-second poll."""
+        if url == self._art_url:
+            return
+        self._art_url = url
+        pm = remote_pixmap(url, ART) if url else None
+        if pm and not pm.isNull():
+            self.art.setPixmap(pm)
+        else:
+            self.art.clear()
+
     def set_state(self, playing: bool, title: str, artist: str,
-                  position_ms: int, duration_ms: int):
+                  position_ms: int, duration_ms: int, art_url: str = ""):
+        self.set_art(art_url)
         self.btn_play.setText("❚❚" if playing else "▶")
         self.now.setText(f"{title} — {artist}" if title else "Nothing playing")
         self._duration = duration_ms
@@ -112,6 +137,7 @@ class PlayerBar(QWidget):
                 int(1000 * position_ms / duration_ms) if duration_ms else 0)
 
     def set_offline(self, msg: str = "Spotify not running"):
+        self.set_art("")
         self.btn_play.setText("▶")
         self.now.setText(msg)
         self.pos.setText("0:00")

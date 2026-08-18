@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, Optional
 
+import html
+
 import requests
 
 SPOTIFY_API = "https://api.spotify.com/v1"
@@ -141,6 +143,57 @@ class Spotify:
             url = j.get("next")
             params = None
         return out
+
+    # ---------------- details ----------------
+
+    def playlist_details(self, pid: str) -> dict:
+        """Name, description and cover for a playlist.
+
+        Spotify returns the description HTML-escaped (&amp;, &#x27;), so it is
+        unescaped here — what goes back on a PUT is the plain text.
+        """
+        r = self._s.get(
+            f"{SPOTIFY_API}/playlists/{pid}",
+            headers={"Authorization": f"Bearer {self._auth()}"},
+            params={"fields": "name,description,public,images"},
+            timeout=20,
+        )
+        if r.status_code == 401:
+            raise ProviderError("Spotify sign-in expired - sign in again.")
+        if r.status_code != 200:
+            raise ProviderError(f"Spotify returned {r.status_code} for that playlist.")
+        j = r.json()
+        images = j.get("images") or []
+        return {
+            "name": j.get("name", "") or "",
+            "description": html.unescape(j.get("description") or ""),
+            "public": bool(j.get("public")),
+            # Largest first in Spotify's ordering; the smallest is 60px, too
+            # coarse for anything but a list icon.
+            "image": (images[0].get("url") if images else "") or "",
+        }
+
+    def set_playlist_details(self, pid: str, name: str = None,
+                             description: str = None) -> None:
+        """PUT /playlists/{id}. Only the fields given are sent."""
+        body = {}
+        if name is not None:
+            body["name"] = name
+        if description is not None:
+            body["description"] = description
+        if not body:
+            return
+        r = self._s.put(
+            f"{SPOTIFY_API}/playlists/{pid}",
+            headers={"Authorization": f"Bearer {self._auth()}"},
+            json=body,
+            timeout=25,
+        )
+        if r.status_code == 401:
+            raise ProviderError("Spotify sign-in expired - sign in again.")
+        if r.status_code not in (200, 201, 204):
+            raise ProviderError(
+                f"Spotify refused the change ({r.status_code}): {r.text[:120]}")
 
     # ---------------- search ----------------
 

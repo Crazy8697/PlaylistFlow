@@ -127,3 +127,38 @@ def wave_pixmap(size: int, rounded: bool = True, sky: bool = True) -> QPixmap:
     signature stays so makeicon.py and anything else keeps working.
     """
     return icon_pixmap(size, rounded=False)
+
+# --------------------------------------------------------------------------
+# Remote covers
+# --------------------------------------------------------------------------
+
+_remote: dict = {}
+
+
+def remote_pixmap(url: str, size: int) -> QPixmap:
+    """Fetch a cover from Spotify's CDN, square-cropped to `size`.
+
+    Cached by (url, size): the player asks for the same art on every poll, and
+    covers are immutable at a given URL. A failure caches as a null pixmap so a
+    dead URL is not retried on a two-second timer.
+    """
+    key = (url, size)
+    if key in _remote:
+        return _remote[key]
+    pm = QPixmap()
+    if url:
+        try:
+            import requests
+            r = requests.get(url, timeout=10)
+            if r.status_code == 200:
+                img = QImage()
+                if img.loadFromData(r.content):
+                    scaled = img.scaled(size, size, Qt.KeepAspectRatioByExpanding,
+                                        Qt.SmoothTransformation)
+                    x = max(0, (scaled.width() - size) // 2)
+                    y = max(0, (scaled.height() - size) // 2)
+                    pm = QPixmap.fromImage(scaled.copy(x, y, size, size))
+        except Exception:
+            pm = QPixmap()
+    _remote[key] = pm
+    return pm

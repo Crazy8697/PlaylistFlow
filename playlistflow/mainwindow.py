@@ -32,12 +32,13 @@ from .table import TrackTable, COL_BPM, COL_KEY
 from .spinner import Spinner
 from .player import PlayerBar
 from .brand import spotify_icon, spotify_pixmap, icon_size
-from .artwork import about_pixmap
+from .artwork import about_pixmap, icon_pixmap, remote_pixmap
 from .wheel import KeyWheelDialog
 from .websearch import BraveLookup
 from .finderdialog import FinderDialog
 
 UNDO_CAP = 40
+COVER = 84                 # playlist cover in the bottom strip
 AUTOSAVE_MS = 1500
 
 
@@ -445,6 +446,8 @@ class MainWindow(QMainWindow):
         self.felt = self.prefs.felt
         self.current_name = ""
         self.current_pid = ""          # Spotify playlist id, when it came from there
+        self.current_desc = ""
+        self.current_image = ""
         self.worker: FetchWorker | None = None
         self.wheel: KeyWheelDialog | None = None
         self._refreshing_spotify = False
@@ -620,6 +623,14 @@ class MainWindow(QMainWindow):
                      "keys that mix with it. Stays open while you work.")
         b.clicked.connect(self.open_wheel)
         ctl.addWidget(b)
+        b = QPushButton("Push to Spotify")
+        b.setToolTip("Make the Spotify playlist match this window." "\n"
+                     "Adds tracks it does not have, offers to remove ones it "
+                     "has and this does not, then reorders.")
+        b.setIcon(spotify_icon(15))
+        b.setIconSize(icon_size(15))
+        b.clicked.connect(self.push_order)
+        ctl.addWidget(b)
         ctl.addStretch(1)
         self.spinner = Spinner(16)
         ctl.addWidget(self.spinner)
@@ -670,57 +681,49 @@ class MainWindow(QMainWindow):
         self.vsplit.setStretchFactor(0, 0)
         self.vsplit.setStretchFactor(1, 1)
 
-        # bottom strip — add and export side by side so the table keeps the height
-        bottom = QHBoxLayout()
-        bottom.setSpacing(9)
+        # bottom strip — what this playlist IS, rather than controls.
+        # Adding tracks by hand and the URI block both moved out: the finder
+        # covers the first, and the second is a once-per-session action that
+        # does not need permanent screen space.
+        info = QWidget()
+        il = QHBoxLayout(info)
+        il.setContentsMargins(0, 0, 0, 0)
+        il.setSpacing(10)
 
-        add = QGroupBox("Add a track")
-        al = QVBoxLayout(add)
-        r1 = QHBoxLayout()
-        self.f_title = QLineEdit(); self.f_title.setPlaceholderText("Title")
-        self.f_artist = QLineEdit(); self.f_artist.setPlaceholderText("Artist")
-        r1.addWidget(self.f_title, 2)
-        r1.addWidget(self.f_artist, 1)
-        al.addLayout(r1)
-        r2 = QHBoxLayout()
-        self.f_bpm = QLineEdit(); self.f_bpm.setPlaceholderText("BPM")
-        self.f_key = QLineEdit(); self.f_key.setPlaceholderText("11A")
-        r2.addWidget(self.f_bpm, 1)
-        r2.addWidget(self.f_key, 1)
-        b = QPushButton("Add")
-        b.clicked.connect(self.add_track)
-        r2.addWidget(b, 1)
-        al.addLayout(r2)
-        for w in (self.f_title, self.f_artist, self.f_bpm, self.f_key):
-            w.returnPressed.connect(self.add_track)
-        bottom.addWidget(add, 2)
+        self.pl_cover = QLabel()
+        self.pl_cover.setFixedSize(COVER, COVER)
+        self.pl_cover.setObjectName("cover")
+        il.addWidget(self.pl_cover)
 
-        exp = QGroupBox("Export — paste into a Spotify playlist")
-        el = QVBoxLayout(exp)
-        self.uri_box = QPlainTextEdit()
-        self.uri_box.setReadOnly(True)
-        self.uri_box.setMaximumHeight(58)
-        el.addWidget(self.uri_box)
-        row = QHBoxLayout()
-        b = QPushButton("Copy to clipboard")
-        b.clicked.connect(self.copy_uris)
-        row.addWidget(b)
-        b = QPushButton("Push order to Spotify")
-        b.setToolTip("Reorder the Spotify playlist to match this window.\n"
-                     "Moves tracks rather than replacing them, so nothing is "
-                     "removed and the dates added are kept.")
-        b.setIcon(spotify_icon(15))
-        b.setIconSize(icon_size(15))
-        b.clicked.connect(self.push_order)
-        row.addWidget(b)
-        el.addLayout(row)
-        bottom.addWidget(exp, 3)
+        meta = QVBoxLayout()
+        meta.setSpacing(4)
+        self.pl_name = QLabel("No playlist open")
+        self.pl_name.setObjectName("plname")
+        meta.addWidget(self.pl_name)
+        self.pl_desc = QPlainTextEdit()
+        self.pl_desc.setPlaceholderText("Add an optional description")
+        self.pl_desc.setMaximumHeight(52)
+        self.pl_desc.setTabChangesFocus(True)
+        meta.addWidget(self.pl_desc)
+        il.addLayout(meta, 1)
 
-        bottom_w = QWidget()
-        bottom_w.setLayout(bottom)
-        bottom_w.setMinimumHeight(90)
-        self.vsplit.addWidget(bottom_w)
-        self.vsplit.setStretchFactor(2, 0)
+        side_btns = QVBoxLayout()
+        side_btns.setSpacing(4)
+        self.btn_desc = QPushButton("Save description")
+        self.btn_desc.setToolTip(
+            "Write the description back to the Spotify playlist." "\n"
+            "Saved with the local playlist either way.")
+        self.btn_desc.setIcon(spotify_icon(15))
+        self.btn_desc.setIconSize(icon_size(15))
+        self.btn_desc.clicked.connect(self.save_description)
+        side_btns.addWidget(self.btn_desc)
+        side_btns.addStretch(1)
+        il.addLayout(side_btns)
+
+        # Deliberately NOT in the splitter: this is reference material to judge
+        # tracks against while working, so it must not be draggable shut.
+        info.setFixedHeight(COVER + 14)
+        cl.addWidget(info)
 
         self.player = PlayerBar()
         self.player.playPauseClicked.connect(self.toggle_play)
@@ -758,6 +761,9 @@ class MainWindow(QMainWindow):
         a.setShortcut(QKeySequence("Ctrl+R"))
         a.setIcon(spotify_icon(15))
         a.triggered.connect(self.sync_playlist); m.addAction(a)
+        a = QAction("&Export URI block…", self)
+        a.setShortcut(QKeySequence("Ctrl+E"))
+        a.triggered.connect(self.export_uris); m.addAction(a)
         a = QAction("Find tracks in &bulk…", self)
         a.setShortcut(QKeySequence("Ctrl+Shift+F"))
         a.setIcon(spotify_icon(15))
@@ -987,8 +993,10 @@ class MainWindow(QMainWindow):
         self.snapshot()
         self.tracks = self.store.load(name)
         self.current_pid = self.store.last_loaded_pid
+        self.current_desc = self.store.last_loaded_desc
         self.current_name = name
         self.refresh()
+        self.load_details()
         self.status(f"Loaded {name} — {len(self.tracks)} tracks.")
 
     def rename_saved(self):
@@ -1037,14 +1045,15 @@ class MainWindow(QMainWindow):
                 return
             name = name.strip()
         self.current_name = name
-        self.store.save(name, self.tracks, auto=False, pid=self.current_pid)
+        self.store.save(name, self.tracks, auto=False, pid=self.current_pid,
+                        description=self.current_desc)
         self.refresh_saved()
         self.status(f"Saved {name}.")
 
     def _write_auto(self):
         if self.store and self.current_name and self.tracks:
             self.store.save(self.current_name, self.tracks, auto=True,
-                            pid=self.current_pid)
+                            pid=self.current_pid, description=self.current_desc)
 
     # ---------------- undo ----------------
 
@@ -1237,6 +1246,7 @@ class MainWindow(QMainWindow):
         self.current_pid = pid
         self.current_name = name or "Untitled playlist"
         self.refresh()
+        self.load_details()
         cached = sum(1 for t in self.tracks if t.resolved)
         self.status(
             f"Loaded {len(self.tracks)} tracks from '{self.current_name}' "
@@ -1314,7 +1324,7 @@ class MainWindow(QMainWindow):
         self.refresh()
         if self.store and self.current_name:
             self.store.save(self.current_name, self.tracks, auto=False,
-                            pid=self.current_pid)
+                            pid=self.current_pid, description=self.current_desc)
             self.refresh_saved()
         msg = "Added %d tracks to %s" % (len(fresh), self.current_name or "the playlist")
         if skipped:
@@ -1398,40 +1408,13 @@ class MainWindow(QMainWindow):
         # but coalesce the expensive full table rebuild, or 49 results in quick
         # succession starve the repaint and nothing appears to move.
         self.stat.setText(summary(self.tracks))
+        self.show_playlist_info()
         self._live.start()
 
     def _fetch_done(self):
         self.busy_off()
         self.refresh(keep_undo=True)
         self._autosave.start()
-
-    def add_track(self):
-        title = self.f_title.text().strip()
-        bpm_s = self.f_bpm.text().strip()
-        key_s = self.f_key.text().strip().upper()
-        if not title:
-            self.status("Needs a title.")
-            return
-        try:
-            bpm = float(bpm_s) if bpm_s else 0.0
-        except ValueError:
-            self.status("BPM must be a number.")
-            return
-        if key_s and not valid_key(key_s):
-            self.status("Key needs to look like 11A or 5B.")
-            return
-        self.snapshot()
-        t = Track(title=title, artist=self.f_artist.text().strip(),
-                  bpm=bpm, key=key_s, source="manual" if (bpm or key_s) else "",
-                  manual=bool(bpm or key_s))
-        if not t.resolved:
-            self.store.apply_cache(t)
-        self.tracks.append(t)
-        for w in (self.f_title, self.f_artist, self.f_bpm, self.f_key):
-            w.clear()
-        self.f_title.setFocus()
-        self.refresh()
-        self.status("Added at the end — drag it where it belongs.")
 
     def delete_rows(self, rows: list[int]):
         if not rows:
@@ -1805,12 +1788,19 @@ class MainWindow(QMainWindow):
         row = next((i for i, t in enumerate(self.tracks) if t.uri and t.uri == uri), -1)
         self.table.set_playing_row(row)
         self.chart.set_playhead(row, st.get("progress_ms") or 0)
+        images = ((item.get("album") or {}).get("images") or [])
+        # Smallest image that still covers the 44px slot; the 640px one is a
+        # needless download for a thumbnail.
+        art = ""
+        if images:
+            art = (images[-1] if len(images) > 2 else images[0]).get("url", "")
         self.player.set_state(
             playing=bool(st.get("is_playing")),
             title=item.get("name", ""),
             artist=", ".join(a.get("name", "") for a in item.get("artists", [])),
             position_ms=st.get("progress_ms") or 0,
             duration_ms=item.get("duration_ms") or 0,
+            art_url=art,
         )
 
     def copy_tracks(self, rows: list):
@@ -1833,14 +1823,95 @@ class MainWindow(QMainWindow):
         else:
             self.status(f"Copied {len(lines)} tracks as artist - title.")
 
+    def uri_block(self) -> str:
+        return "\n".join(t.uri for t in self.tracks if t.uri)
+
     def copy_uris(self):
-        text = self.uri_box.toPlainText()
+        text = self.uri_block()
         if not text.strip():
             self.status("Nothing to copy — no track URIs in this playlist.")
             return
         QGuiApplication.clipboard().setText(text)
-        n = len(text.strip().splitlines())
-        self.status(f"Copied {n} URIs.")
+        self.status(f"Copied {len(text.splitlines())} URIs.")
+
+    def export_uris(self):
+        """The URI block, on demand.
+
+        It used to occupy a permanent panel for something done once a session,
+        so it moved to a dialog under File.
+        """
+        text = self.uri_block()
+        if not text:
+            self.status("Nothing to export — no track URIs in this playlist.")
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Export — paste into a Spotify playlist")
+        dlg.setMinimumSize(520, 420)
+        lay = QVBoxLayout(dlg)
+        lay.addWidget(QLabel(
+            f"{len(text.splitlines())} track URIs, in this window's order. "
+            "Spotify keeps the order when you paste them into a playlist."))
+        box = QPlainTextEdit()
+        box.setPlainText(text)
+        box.setReadOnly(True)
+        lay.addWidget(box, 1)
+        row = QHBoxLayout()
+        b = QPushButton("Copy to clipboard")
+        b.clicked.connect(lambda: (QGuiApplication.clipboard().setText(text),
+                                   self.status(f"Copied {len(text.splitlines())} URIs.")))
+        row.addWidget(b)
+        row.addStretch(1)
+        c = QPushButton("Close")
+        c.clicked.connect(dlg.accept)
+        row.addWidget(c)
+        lay.addLayout(row)
+        dlg.exec()
+
+    def save_description(self):
+        """Persist the description locally, and to Spotify when it came from there."""
+        desc = self.pl_desc.toPlainText().strip()
+        self.current_desc = desc
+        if self.store and self.current_name:
+            self.store.save(self.current_name, self.tracks, auto=False,
+                            pid=self.current_pid, description=desc)
+        if not self.current_pid:
+            self.status("Description saved with the local playlist.")
+            return
+        if not self.auth.authorised and not self.sign_in():
+            return
+        try:
+            self.spotify.set_playlist_details(self.current_pid, description=desc)
+        except (ProviderError, AuthError) as e:
+            QMessageBox.warning(self, "Save description", str(e))
+            self.status(str(e))
+            return
+        self.status("Description saved to Spotify.")
+
+    def show_playlist_info(self):
+        """Refresh the bottom strip from whatever is currently open."""
+        self.pl_name.setText(self.current_name or "No playlist open")
+        if self.pl_desc.toPlainText().strip() != (self.current_desc or ""):
+            self.pl_desc.setPlainText(self.current_desc or "")
+        self.btn_desc.setEnabled(bool(self.current_name))
+        pm = remote_pixmap(self.current_image, COVER) if self.current_image else None
+        if pm and not pm.isNull():
+            self.pl_cover.setPixmap(pm)
+        else:
+            self.pl_cover.setPixmap(icon_pixmap(COVER))
+
+    def load_details(self):
+        """Pull name/description/cover for a Spotify-backed playlist."""
+        if not self.current_pid or not self.auth.authorised:
+            self.show_playlist_info()
+            return
+        try:
+            d = self.spotify.playlist_details(self.current_pid)
+        except (ProviderError, AuthError):
+            self.show_playlist_info()
+            return
+        self.current_desc = d.get("description", "")
+        self.current_image = d.get("image", "")
+        self.show_playlist_info()
 
     # ---------------- render ----------------
 
@@ -1851,9 +1922,7 @@ class MainWindow(QMainWindow):
         self.table.set_data(self.tracks, sm, self.felt)
         self.chart.set_data(self.tracks, sm, self.felt, sel)
         self.stat.setText(summary(self.tracks))
-        self.uri_box.setPlainText(
-            "\n".join(t.uri for t in self.tracks if t.uri)
-        )
+        self.show_playlist_info()
         if self.store and self.current_name:
             self._autosave.start()
 
