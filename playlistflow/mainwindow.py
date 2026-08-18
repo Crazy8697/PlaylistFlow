@@ -38,7 +38,7 @@ from .websearch import BraveLookup
 from .finderdialog import FinderDialog
 
 UNDO_CAP = 40
-COVER = 76                 # playlist cover in the bottom strip
+COVER = 88                 # playlist cover in the bottom strip
 AUTOSAVE_MS = 1500
 
 
@@ -719,15 +719,21 @@ class MainWindow(QMainWindow):
 
         self.pl_desc = QPlainTextEdit()
         self.pl_desc.setPlaceholderText("Add an optional description")
-        self.pl_desc.setMaximumHeight(46)
         self.pl_desc.setTabChangesFocus(True)
-        meta.addWidget(self.pl_desc)
+        # Expands to fill the strip, so its bottom edge lands exactly level
+        # with the cover's -- a fixed height left the cover overhanging the
+        # text column and looking cropped.
+        meta.addWidget(self.pl_desc, 1)
         il.addLayout(meta, 1)
 
         # Deliberately NOT in the splitter: this is reference material to judge
         # tracks against while working, so it must not be draggable shut.
         # Left half: what this playlist is. Right half: what is playing.
         strip = QHBoxLayout()
+        # Default layout margins (~9px a side) were quietly eating the strip's
+        # fixed height: the 88px cover only had 70px to live in, and its bottom
+        # was clipped -- which is exactly what showed on screen.
+        strip.setContentsMargins(0, 0, 0, 0)
         strip.setSpacing(12)
         strip.addWidget(info, 1)
 
@@ -741,7 +747,7 @@ class MainWindow(QMainWindow):
 
         strip_w = QWidget()
         strip_w.setLayout(strip)
-        strip_w.setFixedHeight(COVER + 16)
+        strip_w.setFixedHeight(COVER)
         cl.addWidget(strip_w)
 
         outer.addWidget(col)
