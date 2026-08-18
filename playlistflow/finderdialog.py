@@ -45,9 +45,12 @@ class FinderDialog(QDialog):
 
     send_to_playlist = Signal(list)     # list[Track], in input order
 
-    def __init__(self, sp: Spotify, parent=None):
+    def __init__(self, sp: Spotify, known_uris=None, parent=None):
         super().__init__(parent)
         self.sp = sp
+        # What the playlist already holds, so the finder can say so up front
+        # rather than letting the same track be added twice.
+        self.known_uris = set(known_uris or ())
         self.worker: SearchWorker | None = None
         self.lines: list[Line] = []
         self.results: dict[int, Result] = {}
@@ -269,6 +272,11 @@ class FinderDialog(QDialog):
 
             if res.status == AUTO and res.candidates:
                 parent.setForeground(COL_TRACK, QBrush(QColor(OK)))
+
+            pick = res.pick
+            if pick and pick.uri in self.known_uris:
+                parent.setText(COL_NOTE, "already in your playlist")
+                parent.setForeground(COL_NOTE, QBrush(QColor(ACCENT)))
         finally:
             self._syncing = False
 
@@ -316,12 +324,17 @@ class FinderDialog(QDialog):
     # ------------------------------------------------------------------
 
     def _picked_in_order(self) -> list:
-        """Input order, always — the paste into Spotify has to preserve it."""
-        out = []
+        """Input order, always — the paste into Spotify has to preserve it.
+
+        Deduplicated by URI: two differently-worded lines can resolve to the
+        same track, and a repeated URI would add it twice on paste.
+        """
+        out, seen = [], set()
         for i in sorted(self.results):
             res = self.results[i]
             c = res.pick
-            if c and c.uri:
+            if c and c.uri and c.uri not in seen:
+                seen.add(c.uri)
                 out.append(c)
         return out
 
@@ -345,7 +358,9 @@ class FinderDialog(QDialog):
             for c in picks
         ]
         self.send_to_playlist.emit(tracks)
-        self.msg.setText("Sent %d tracks to the playlist view." % len(tracks))
+        # Close rather than sit there inviting a second click — the batch has
+        # already been handed over, and pressing it again re-adds everything.
+        self.accept()
 
     # ------------------------------------------------------------------
 

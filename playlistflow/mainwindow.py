@@ -1170,7 +1170,8 @@ class MainWindow(QMainWindow):
         """
         if not self.auth.authorised and not self.sign_in():
             return
-        dlg = FinderDialog(self.spotify, self)
+        known = {t.uri for t in self.tracks if t.uri}
+        dlg = FinderDialog(self.spotify, known, self)
         dlg.send_to_playlist.connect(self._absorb_found)
         dlg.exec()
 
@@ -1179,16 +1180,31 @@ class MainWindow(QMainWindow):
 
         The lookup runs on the *resolved* title and artist rather than the line
         the user pasted — that metadata is canonical and matches far better.
+
+        Anything already in the playlist is skipped. Sending the same batch
+        twice is easy to do by accident, and silently doubling the playlist is
+        a worse outcome than saying nothing was added.
         """
         if not tracks:
             return
+        have = {t.uri for t in self.tracks if t.uri}
+        fresh = [t for t in tracks if not t.uri or t.uri not in have]
+        skipped = len(tracks) - len(fresh)
+
+        if not fresh:
+            self.status("All %d were already in the playlist — nothing added." % skipped)
+            return
+
         self.snapshot()
-        for t in tracks:
-            if not t.resolved:
-                self.store.apply_cache(t) if self.store else None
+        for t in fresh:
+            if not t.resolved and self.store:
+                self.store.apply_cache(t)
             self.tracks.append(t)
         self.refresh()
-        self.status("Added %d tracks from the finder — fetching BPM/key." % len(tracks))
+        msg = "Added %d tracks from the finder" % len(fresh)
+        if skipped:
+            msg += " (skipped %d already in the playlist)" % skipped
+        self.status(msg + " — fetching BPM/key.")
         QTimer.singleShot(0, self.fetch_features)
 
     def sign_in(self) -> bool:
