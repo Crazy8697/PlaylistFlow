@@ -129,7 +129,8 @@ class PlayerBar(QWidget):
         if url == self._art_url:
             return
         self._art_url = url
-        pm = remote_pixmap(url, ART) if url else None
+        # 2px under the widget so the 1px border stays visible all round.
+        pm = remote_pixmap(url, ART - 2) if url else None
         if pm and not pm.isNull():
             self.art.setPixmap(pm)
         else:

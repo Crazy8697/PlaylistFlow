@@ -1904,11 +1904,14 @@ class MainWindow(QMainWindow):
         if self.pl_desc.toPlainText().strip() != (self.current_desc or ""):
             self.pl_desc.setPlainText(self.current_desc or "")
         self.btn_desc.setEnabled(bool(self.current_name))
-        pm = remote_pixmap(self.current_image, COVER) if self.current_image else None
+        # The label draws a 1px border, so the image must be 2px smaller than
+        # the widget or it paints over the bottom and right edges of the frame.
+        inner = COVER - 2
+        pm = remote_pixmap(self.current_image, inner) if self.current_image else None
         if pm and not pm.isNull():
             self.pl_cover.setPixmap(pm)
         else:
-            self.pl_cover.setPixmap(icon_pixmap(COVER))
+            self.pl_cover.setPixmap(icon_pixmap(inner))
 
     def load_details(self):
         """Pull name/description/cover for a Spotify-backed playlist."""
