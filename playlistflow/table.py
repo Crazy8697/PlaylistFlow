@@ -471,14 +471,13 @@ class TrackTable(QTableWidget):
             if s.both:
                 p.setPen(QPen(BAD))
                 p.drawText(x, y, "← both off")
+                x += fm.horizontalAdvance("← both off") + 14
 
             if s.checked:
-                # The user has listened to this seam and signed off on it.
-                # Right-aligned so it never collides with the readout text.
-                mark = "✓ ear-checked"
+                # Inline with the key/tempo readout, so one glance down the
+                # left edge covers everything known about each seam.
                 p.setPen(QPen(OKGREEN))
-                p.drawText(self.viewport().width() - fm.horizontalAdvance(mark) - 18,
-                           y, mark)
+                p.drawText(x, y, "✓ ear-checked")
 
         self._paint_drop_line(p)
         p.end()
