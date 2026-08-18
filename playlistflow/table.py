@@ -146,6 +146,7 @@ class TrackTable(QTableWidget):
     playRequested = Signal(int)         # row
     previewRequested = Signal(int)      # row
     crossCheckRequested = Signal(int)   # row
+    copyRequested = Signal(list)        # rows -> "Artist - Title"
 
     def __init__(self, parent=None):
         super().__init__(0, len(HEADERS), parent)
@@ -204,10 +205,21 @@ class TrackTable(QTableWidget):
         m.addSeparator()
         a = m.addAction("Cross-check BPM && key on the web")
         a.triggered.connect(lambda: self.crossCheckRequested.emit(row))
+        a = m.addAction("Copy artist - title")
+        a.triggered.connect(lambda: self.copyRequested.emit(self._sel_rows(row)))
         m.addSeparator()
         a = m.addAction("Remove from list")
         a.triggered.connect(lambda: self.deleteRequested.emit([row]))
         m.exec(self.viewport().mapToGlobal(pos))
+
+    def _sel_rows(self, clicked: int) -> list:
+        """Selected rows, or just the clicked one when it sits outside them.
+
+        Right-clicking a row that is not part of the selection should act on
+        that row, not on whatever happened to be highlighted elsewhere.
+        """
+        rows = sorted({i.row() for i in self.selectedIndexes()})
+        return rows if clicked in rows else [clicked]
 
     def next_blank(self, after_row: int = -1, after_col: int = -1) -> tuple[int, int]:
         """Next missing BPM or key as (row, column); (-1, -1) when none left.
@@ -343,6 +355,14 @@ class TrackTable(QTableWidget):
             self.edited.emit(row, "key", item.text())
 
     def keyPressEvent(self, e):
+        # Ctrl+C copies "Artist - Title". While a cell is being edited it has to
+        # stay the ordinary text copy.
+        if (e.key() == Qt.Key_C and e.modifiers() & Qt.ControlModifier
+                and self.state() != QAbstractItemView.EditingState):
+            rows = sorted({i.row() for i in self.selectedIndexes()})
+            if rows:
+                self.copyRequested.emit(rows)
+                return
         if e.key() in (Qt.Key_Delete, Qt.Key_Backspace) and self.state() != QAbstractItemView.EditingState:
             rows = sorted({i.row() for i in self.selectedIndexes()})
             if rows:

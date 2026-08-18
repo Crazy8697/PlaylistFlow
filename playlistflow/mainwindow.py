@@ -656,6 +656,7 @@ class MainWindow(QMainWindow):
         self.table.playRequested.connect(self.play_from)
         self.table.previewRequested.connect(self.preview_row)
         self.table.crossCheckRequested.connect(self.cross_check)
+        self.table.copyRequested.connect(self.copy_tracks)
         self.table.edited.connect(self.edit_cell)
         self.table.deleteRequested.connect(self.delete_rows)
         self.table.itemSelectionChanged.connect(self._sync_selection)
@@ -1624,14 +1625,43 @@ class MainWindow(QMainWindow):
         only_here = [u for u in target if u not in cur]
 
         if only_there:
-            # Tracks on Spotify that this window has dropped. Removing them is a
-            # different, destructive intent, and not something to infer.
-            QMessageBox.warning(
+            # Tracks on Spotify this window has dropped. Destructive, so it
+            # is opt-in, defaults to No, and says plainly what it will do.
+            # These are not in this window, so their titles have to be looked
+            # up -- confirming a deletion against a bare id is not a choice.
+            try:
+                names = self.spotify.track_names(sorted(only_there)[:50])
+            except (ProviderError, AuthError):
+                names = {}
+            shown = [names.get(u) or u.split(":")[-1]
+                     for u in sorted(only_there)[:3]]
+            listing = ", ".join(shown)
+            if len(only_there) > 3:
+                listing += ", and %d more" % (len(only_there) - 3)
+            if QMessageBox.question(
                 self, "Push order",
-                f"{len(only_there)} track(s) on Spotify are not in this window. "
-                "Pushing would have to remove them, which this does not do. "
-                "Reload the playlist, redo your order, then push.")
-            return
+                f"{len(only_there)} track(s) on Spotify are not in this window:"
+                "\n\n"
+                f"{listing}"
+                "\n\n"
+                f"Remove them from '{self.current_name}' on Spotify, then "
+                f"reorder the remaining {len(target)}?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+            ) != QMessageBox.Yes:
+                self.status("Nothing pushed.")
+                return
+            self.busy_on("Removing tracks...")
+            try:
+                n = self.spotify.remove_items(
+                    self.current_pid, sorted(only_there),
+                    progress=lambda a, t: self.status(f"Removed {a} of {t}..."))
+            except (ProviderError, AuthError) as e:
+                QMessageBox.warning(self, "Push order", str(e))
+                self.status(str(e))
+                return
+            finally:
+                self.busy_off()
+            self.status(f"Removed {n} track(s) from '{self.current_name}'.")
 
         if only_here:
             # The normal case after using the finder: this window holds tracks
@@ -1782,6 +1812,26 @@ class MainWindow(QMainWindow):
             position_ms=st.get("progress_ms") or 0,
             duration_ms=item.get("duration_ms") or 0,
         )
+
+    def copy_tracks(self, rows: list):
+        """Copy the selected tracks as "Artist - Title", one per line.
+
+        Separate from Copy URIs: this is the form that goes into a search box or
+        a message to somebody, rather than into Spotify.
+        """
+        picked = [self.tracks[r] for r in rows if 0 <= r < len(self.tracks)]
+        if not picked:
+            return
+        lines = []
+        for t in picked:
+            artist = (t.artist or "").strip()
+            title = (t.title or "").strip()
+            lines.append(f"{artist} - {title}" if artist else title)
+        QGuiApplication.clipboard().setText("\n".join(lines))
+        if len(lines) == 1:
+            self.status(f"Copied '{lines[0]}'.")
+        else:
+            self.status(f"Copied {len(lines)} tracks as artist - title.")
 
     def copy_uris(self):
         text = self.uri_box.toPlainText()

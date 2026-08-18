@@ -282,6 +282,70 @@ class Spotify:
                 progress(added, len(uris))
         return added
 
+    def track_names(self, uris: list) -> dict:
+        """uri -> "Artist - Title" for tracks this app has no local copy of.
+
+        Used to name what a destructive confirmation is about to delete, rather
+        than showing the user a base-62 id. Best effort: on any failure the
+        caller falls back to the id.
+        """
+        out = {}
+        ids = [u.split(":")[-1] for u in uris if u.startswith("spotify:track:")]
+        for start in range(0, min(len(ids), 50), 50):
+            chunk = ids[start:start + 50]
+            try:
+                r = self._s.get(
+                    f"{SPOTIFY_API}/tracks",
+                    headers={"Authorization": f"Bearer {self._auth()}"},
+                    params={"ids": ",".join(chunk), "market": "US"},
+                    timeout=20,
+                )
+                if r.status_code != 200:
+                    continue
+                for t in (r.json().get("tracks") or []):
+                    if not t:
+                        continue
+                    artists = ", ".join(a.get("name", "") for a in (t.get("artists") or []))
+                    name = t.get("name", "")
+                    out[t.get("uri", "")] = f"{artists} - {name}" if artists else name
+            except Exception:
+                continue
+        return out
+
+    def remove_items(self, pid: str, uris: list, progress=None) -> int:
+        """Remove tracks from a playlist. Returns how many were removed.
+
+        DELETE /playlists/{id}/items, body {"tracks": [{"uri": ...}]} -- the
+        same rename as the rest; DELETE /tracks answers 403. 100 per request.
+
+        Removes every occurrence of each uri. Destructive, so the caller is
+        expected to have confirmed it explicitly.
+        """
+        removed = 0
+        for start in range(0, len(uris), 100):
+            chunk = uris[start:start + 100]
+            r = self._s.request(
+                "DELETE",
+                f"{SPOTIFY_API}/playlists/{pid}/items",
+                headers={"Authorization": f"Bearer {self._auth()}"},
+                json={"tracks": [{"uri": u} for u in chunk]},
+                timeout=30,
+            )
+            if r.status_code == 429:
+                raise ProviderError(
+                    f"Spotify rate limit after removing {removed} track(s). "
+                    "Wait a minute and try again."
+                )
+            if r.status_code not in (200, 201):
+                raise ProviderError(
+                    f"Spotify refused to remove tracks ({r.status_code}) after "
+                    f"{removed} successful one(s): {r.text[:120]}"
+                )
+            removed += len(chunk)
+            if progress:
+                progress(removed, len(uris))
+        return removed
+
     def reorder_playlist(self, pid: str, target: list[str], progress=None) -> int:
         """Permute the playlist into `target` order using move operations.
 
