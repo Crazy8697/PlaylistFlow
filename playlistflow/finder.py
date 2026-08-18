@@ -177,16 +177,22 @@ class Result:
 
 
 def leads_line(line_norm: str, name: str) -> bool:
-    """Does `name` start the line, ending on a word boundary?
+    """Does `name` sit at either END of the line, on a word boundary?
 
-    A bare startswith() matches mid-token: the track "zzz" would "lead" the line
-    "zzzz nonexistent track", which is how a nonsense line acquired a confident
-    match. The trailing space is the whole point.
+    Lists arrive in both orders -- "Save You a Seat Alex Warren" and
+    "Colter Wall Cowpoke" -- and there is no delimiter to tell which. So the
+    title is accepted at the front or the back, and the artist check does the
+    work of confirming which half is which.
+
+    Word boundaries matter: a bare startswith() matches mid-token, and the
+    track "zzz" would otherwise "lead" the line "zzzz nonexistent track".
     """
     n = norm(name)
     if not n:
         return False
-    return line_norm == n or line_norm.startswith(n + " ")
+    return (line_norm == n
+            or line_norm.startswith(n + " ")
+            or line_norm.endswith(" " + n))
 
 
 def artist_named(line_norm: str, cand) -> bool:
@@ -227,11 +233,19 @@ def consumes_line(line_norm: str, cand) -> bool:
     are actually present in the response.
     """
     n = norm(cand.name)
-    if not leads_line(line_norm, cand.name):
+    if not n:
         return False
-    rest = line_norm[len(n):].strip()
+
+    # Both orders: "<title> <artist>" and "<artist> <title>".
+    if line_norm.startswith(n + " "):
+        rest = line_norm[len(n):].strip()
+    elif line_norm.endswith(" " + n):
+        rest = line_norm[:-len(n)].strip()
+    else:
+        return False
     if not rest:
         return False        # nothing left to identify an artist with
+
     if norm(cand.artists) == rest:
         return True
     # A line naming only the lead artist still counts.
@@ -290,7 +304,7 @@ def classify(line: Line, cands: list) -> Result:
     if not named:
         why.append("ARTIST MISMATCH — you didn't name %s" % (top.artists or "them"))
     if not leads:
-        why.append("title doesn't lead the line")
+        why.append("title not found at either end of the line")
     if not decisive:
         why.append("more than one plausible match" if len(matches) > 1
                    else "no clean artist match")
@@ -333,9 +347,12 @@ def fallback_queries(line: Line) -> list:
     for n in (1, 2, 3):
         if len(toks) <= n:
             break
-        title = " ".join(toks[:-n])
-        artist = " ".join(toks[-n:])
-        out.append('track:"%s" artist:"%s"' % (title, artist))
+        # trailing tokens as the artist ("<title> <artist>")
+        out.append('track:"%s" artist:"%s"'
+                   % (" ".join(toks[:-n]), " ".join(toks[-n:])))
+        # leading tokens as the artist ("<artist> <title>")
+        out.append('track:"%s" artist:"%s"'
+                   % (" ".join(toks[n:]), " ".join(toks[:n])))
     return out
 
 
