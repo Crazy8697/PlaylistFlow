@@ -120,6 +120,9 @@ QLabel#busy { color: #8C939D; font-size: 12px; }
 QLabel#now { color: #E9E7E1; font-size: 13px; }
 QLabel#clock { color: #5C636D; font-family: Consolas, monospace; font-size: 11px; }
 QLabel#plname { color: #E9E7E1; font-size: 15px; font-weight: 600; }
+/* Inline buttons that share a text line. The default 7px padding makes a
+   ~32px-tall button, which gets cropped when squeezed onto a label row. */
+QPushButton#inline { padding: 2px 10px; font-size: 11px; }
 /* Covers carry their own edge; a border keeps a dark album art from bleeding
    into the background, and holds the slot's shape before one has loaded. */
 QLabel#cover, QLabel#art { background: #181B21; border: 1px solid #2C313A; border-radius: 3px; }

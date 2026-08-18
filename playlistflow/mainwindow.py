@@ -710,9 +710,9 @@ class MainWindow(QMainWindow):
         self.btn_desc.setToolTip(
             "Write the description back to the Spotify playlist." "\n"
             "Saved with the local playlist either way.")
+        self.btn_desc.setObjectName("inline")
         self.btn_desc.setIcon(spotify_icon(13))
         self.btn_desc.setIconSize(icon_size(13))
-        self.btn_desc.setFixedHeight(22)
         self.btn_desc.clicked.connect(self.save_description)
         head_row.addWidget(self.btn_desc)
         meta.addLayout(head_row)
