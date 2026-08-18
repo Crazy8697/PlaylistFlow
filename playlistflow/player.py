@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtWidgets import (
-    QWidget, QHBoxLayout, QPushButton, QLabel, QSlider, QSpinBox,
+    QWidget, QHBoxLayout, QVBoxLayout, QPushButton, QLabel, QSlider, QSpinBox,
 )
 
 from .artwork import remote_pixmap
@@ -41,9 +41,15 @@ class PlayerBar(QWidget):
         self._duration = 0
         self._dragging = False
 
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(8)
+        # Two rows: what is playing and the transport on top, the scrubber and
+        # the preview controls underneath. One long row pushed the seek bar and
+        # the preview button far away from the buttons they belong with.
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(6)
+
+        top = QHBoxLayout()
+        top.setSpacing(8)
 
         # Cover of whatever is playing. Decorative, but it also makes it
         # obvious at a glance that the transport is bound to a live device.
@@ -51,52 +57,55 @@ class PlayerBar(QWidget):
         self.art.setFixedSize(ART, ART)
         self.art.setObjectName("art")
         self.art.setScaledContents(False)
-        lay.addWidget(self.art)
+        top.addWidget(self.art)
         self._art_url = ""
+
+        self.now = QLabel("Nothing playing")
+        self.now.setObjectName("now")
+        self.now.setMinimumWidth(180)
+        top.addWidget(self.now, 1)
 
         self.btn_prev = QPushButton("◀◀")
         self.btn_prev.setFixedWidth(44)
         self.btn_prev.clicked.connect(self.prevClicked)
-        lay.addWidget(self.btn_prev)
+        top.addWidget(self.btn_prev)
 
         self.btn_play = QPushButton("▶")
         self.btn_play.setFixedWidth(44)
         self.btn_play.clicked.connect(self.playPauseClicked)
-        lay.addWidget(self.btn_play)
+        top.addWidget(self.btn_play)
 
         self.btn_next = QPushButton("▶▶")
         self.btn_next.setFixedWidth(44)
         self.btn_next.clicked.connect(self.nextClicked)
-        lay.addWidget(self.btn_next)
+        top.addWidget(self.btn_next)
 
-        self.now = QLabel("Nothing playing")
-        self.now.setObjectName("now")
-        self.now.setMinimumWidth(220)
-        lay.addWidget(self.now, 1)
+        outer.addLayout(top)
+
+        bot = QHBoxLayout()
+        bot.setSpacing(8)
 
         self.pos = QLabel("0:00")
         self.pos.setObjectName("clock")
-        lay.addWidget(self.pos)
+        bot.addWidget(self.pos)
 
         self.bar = QSlider(Qt.Horizontal)
         self.bar.setRange(0, 1000)
-        self.bar.setFixedWidth(240)
         self.bar.sliderPressed.connect(lambda: setattr(self, "_dragging", True))
         self.bar.sliderReleased.connect(self._released)
-        lay.addWidget(self.bar)
+        bot.addWidget(self.bar, 1)
 
         self.dur = QLabel("0:00")
         self.dur.setObjectName("clock")
-        lay.addWidget(self.dur)
+        bot.addWidget(self.dur)
 
-        lay.addSpacing(10)
         self.btn_preview = QPushButton("Preview transition")
         self.btn_preview.setToolTip(
             "Play the end of the selected track straight into the next one, so "
             "the seam can be heard rather than read off two numbers.")
         self.btn_preview.clicked.connect(
             lambda: self.previewClicked.emit(self.tail.value()))
-        lay.addWidget(self.btn_preview)
+        bot.addWidget(self.btn_preview)
 
         self.tail = QSpinBox()
         self.tail.setRange(5, 60)
@@ -104,7 +113,9 @@ class PlayerBar(QWidget):
         self.tail.setSuffix(" s")
         self.tail.setFixedWidth(64)
         self.tail.setToolTip("How much of the outgoing track to play.")
-        lay.addWidget(self.tail)
+        bot.addWidget(self.tail)
+
+        outer.addLayout(bot)
 
     def _released(self):
         self._dragging = False

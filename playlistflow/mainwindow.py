@@ -722,8 +722,10 @@ class MainWindow(QMainWindow):
 
         # Deliberately NOT in the splitter: this is reference material to judge
         # tracks against while working, so it must not be draggable shut.
-        info.setFixedHeight(COVER + 14)
-        cl.addWidget(info)
+        # Left half: what this playlist is. Right half: what is playing.
+        strip = QHBoxLayout()
+        strip.setSpacing(12)
+        strip.addWidget(info, 1)
 
         self.player = PlayerBar()
         self.player.playPauseClicked.connect(self.toggle_play)
@@ -731,7 +733,12 @@ class MainWindow(QMainWindow):
         self.player.nextClicked.connect(lambda: self._player_do("next"))
         self.player.seekRequested.connect(lambda ms: self._player_do("seek", ms))
         self.player.previewClicked.connect(self.preview_transition)
-        cl.addWidget(self.player)
+        strip.addWidget(self.player, 1)
+
+        strip_w = QWidget()
+        strip_w.setLayout(strip)
+        strip_w.setFixedHeight(COVER + 16)
+        cl.addWidget(strip_w)
 
         outer.addWidget(col)
         outer.setStretchFactor(0, 0)
