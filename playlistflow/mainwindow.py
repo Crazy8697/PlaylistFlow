@@ -1791,13 +1791,17 @@ class MainWindow(QMainWindow):
         if not a.uri or not b.uri:
             self.status("Both tracks need a Spotify link for this.")
             return
+        # The context handed to Spotify is the seam PLUS the rest of the set.
+        # A bare two-track list became Spotify's entire queue, and with repeat
+        # enabled in the client it cycled those two forever.
+        rest = [t.uri for t in self.tracks[i:] if t.uri]
         if a.duration_ms <= 0:
-            # Manually added rows have no duration; just start the incoming one.
-            self._player_do("play", ([b.uri], 0, ""))
+            # Manually added rows have no duration; start at the incoming one.
+            self._player_do("play", (rest[1:], 0, ""))
             self.status(f"No length known for '{a.title}' — playing '{b.title}'.")
             return
         start = max(0, a.duration_ms - tail_s * 1000)
-        self._player_do("play", ([a.uri, b.uri], start, ""))
+        self._player_do("play", (rest, start, ""))
         sm = seams(self.tracks, self.approved)
         s = sm[i] if i < len(sm) else None
         detail = f"  ({s.key.txt}, {s.tempo.txt})" if s and s.known else ""
