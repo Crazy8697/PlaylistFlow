@@ -19,7 +19,7 @@ duration, which are values we actually have.
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QSize
-from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QFont
+from PySide6.QtGui import QFont, QPainter, QColor, QPen, QBrush
 from PySide6.QtWidgets import QWidget, QToolTip
 
 from .domain import Track, Seam, felt_bpm
@@ -32,6 +32,7 @@ BAD = QColor("#E8544F")
 UNRESOLVED = QColor("#3D444F")
 PLAYHEAD = QColor("#3FBFA8")
 DROP_LINE = QColor("#3FBFA8")
+GRID = QColor(44, 49, 58, 170)      # gridlines: EDGE at partial opacity
 
 GAP = 2
 STRIP_GAP = 2         # whole pixels — keeps every gap identical
@@ -257,6 +258,26 @@ class BarChart(QWidget):
             return
 
         strips = self._strip_rects()
+
+        # Horizontal gridlines every 50 BPM, drawn behind the bars so tempo
+        # can be read off the graph without hovering. Values are in shown
+        # units, so they mean felt BPM when the felt view is on.
+        hi, floor = self._scale()
+        plot_h = self._plot_h()
+        if hi > floor and plot_h > 0:
+            grid_font = QFont("Consolas")
+            grid_font.setPointSize(7)
+            p.setFont(grid_font)
+            fm = p.fontMetrics()
+            step = 50
+            v = step
+            while v < hi:
+                y = TOP_PAD + plot_h - (v - floor) / (hi - floor) * plot_h
+                p.setPen(QPen(GRID))
+                p.drawLine(QPointF(0, y), QPointF(self.width(), y))
+                p.setPen(QPen(FAINT))
+                p.drawText(QPointF(4, y - 2), str(v))
+                v += step
 
         for i, (t, r) in enumerate(zip(self._tracks, rects)):
             col = QColor(t.colour()) if t.resolved else UNRESOLVED
