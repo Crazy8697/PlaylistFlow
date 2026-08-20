@@ -523,14 +523,6 @@ class MainWindow(QMainWindow):
         head.addWidget(mark)
         head.addWidget(QLabel("SPOTIFY"))
         head.addStretch(1)
-        b = QPushButton("Sync")
-        b.setToolTip(
-            "Re-read the loaded playlist from Spotify.\n\n"
-            "Tracks added there are appended, tracks removed there are removed "
-            "here, and everything else keeps the order and the BPM/key it "
-            "already has.")
-        b.clicked.connect(self.sync_playlist)
-        head.addWidget(b)
         # Match the main button row's height exactly, so the playlist list and
         # the chart below start on the same line.
         self.sp_head = head
@@ -584,19 +576,12 @@ class MainWindow(QMainWindow):
         self.btn_felt.setChecked(self.felt)
         self.btn_rep.clicked.connect(lambda: self.set_felt(False))
         self.btn_felt.clicked.connect(lambda: self.set_felt(True))
+        self.btn_rep.setToolTip("Show the BPM each track reports.")
+        self.btn_felt.setToolTip(
+            "Show felt BPM — anything at or above the fold threshold "
+            "(Settings → Display) is halved, the way the pulse actually reads.")
         ctl.addWidget(self.btn_rep)
         ctl.addWidget(self.btn_felt)
-        self.btn_timeline = QPushButton("Timeline")
-        self.btn_timeline.setCheckable(True)
-        self.btn_timeline.setToolTip(
-            "Width becomes track length, so the set reads as elapsed time.\n"
-            "Ctrl+wheel over the chart to zoom. Fit button restores equal bars.")
-        self.btn_timeline.clicked.connect(self.toggle_timeline)
-        ctl.addWidget(self.btn_timeline)
-        b = QPushButton("Fit")
-        b.setToolTip("Scale the timeline so the whole set fits the window.")
-        b.clicked.connect(self.zoom_fit)
-        ctl.addWidget(b)
         b = QPushButton("Sort: key")
         b.setToolTip("Sort straight down the wheel — 1A, 1B, 2A, 2B…\n"
                      "Click again to reverse. Tracks with no key go last.")
@@ -606,12 +591,6 @@ class MainWindow(QMainWindow):
         b.setToolTip("Sort by the BPM currently shown (reported or felt).\n"
                      "Click again to reverse. Tracks with no BPM go last.")
         b.clicked.connect(lambda: self.sort_tracks("bpm"))
-        ctl.addWidget(b)
-        b = QPushButton("Undo")
-        b.clicked.connect(self.undo)
-        ctl.addWidget(b)
-        b = QPushButton("Save")
-        b.clicked.connect(self.save_playlist)
         ctl.addWidget(b)
         b = QPushButton("Fetch BPM/key")
         b.setToolTip("Look up anything still missing.")
@@ -627,14 +606,6 @@ class MainWindow(QMainWindow):
                      "keys that mix with it. Stays open while you work.")
         b.clicked.connect(self.open_wheel)
         ctl.addWidget(b)
-        b = QPushButton("Push to Spotify")
-        b.setToolTip("Make the Spotify playlist match this window." "\n"
-                     "Adds tracks it does not have, offers to remove ones it "
-                     "has and this does not, then reorders.")
-        b.setIcon(spotify_icon(15))
-        b.setIconSize(icon_size(15))
-        b.clicked.connect(self.push_order)
-        ctl.addWidget(b)
         ctl.addStretch(1)
         self.spinner = Spinner(16)
         ctl.addWidget(self.spinner)
@@ -645,6 +616,25 @@ class MainWindow(QMainWindow):
         self.stat = QLabel("")
         self.stat.setObjectName("stat")
         ctl.addWidget(self.stat)
+        ctl.addSpacing(12)
+        b = QPushButton("Sync")
+        b.setToolTip(
+            "Re-read the loaded playlist from Spotify.\n\n"
+            "Tracks added there are appended, tracks removed there are removed "
+            "here, and everything else keeps the order and the BPM/key it "
+            "already has.")
+        b.setIcon(spotify_icon(15))
+        b.setIconSize(icon_size(15))
+        b.clicked.connect(self.sync_playlist)
+        ctl.addWidget(b)
+        b = QPushButton("Push to Spotify")
+        b.setToolTip("Make the Spotify playlist match this window." "\n"
+                     "Adds tracks it does not have, offers to remove ones it "
+                     "has and this does not, then reorders.")
+        b.setIcon(spotify_icon(15))
+        b.setIconSize(icon_size(15))
+        b.clicked.connect(self.push_order)
+        ctl.addWidget(b)
         cl.addLayout(ctl)
 
         # chart
@@ -832,6 +822,24 @@ class MainWindow(QMainWindow):
             e.addAction(a)
 
         h = self.menuBar().addMenu("&Help")
+        corner = QWidget()
+        cw = QHBoxLayout(corner)
+        cw.setContentsMargins(0, 0, 6, 0)
+        cw.setSpacing(0)
+        for text, tip, slot in (
+            ("Undo", "Undo the last change (Ctrl+Z).", self.undo),
+            ("Save", "Save this playlist (Ctrl+S).", self.save_playlist),
+        ):
+            b = QPushButton(text)
+            b.setObjectName("menubtn")
+            b.setToolTip(tip)
+            b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(slot)
+            cw.addWidget(b)
+        # Keep a Python-side reference: PySide's wrapper has been seen
+        # dropping corner widgets whose only owner is the C++ side.
+        self._menu_corner = corner
+        self.menuBar().setCornerWidget(corner, Qt.TopRightCorner)
         a = QAction("&About", self)
         a.triggered.connect(lambda: AboutDialog(self).exec())
         h.addAction(a)
@@ -990,8 +998,7 @@ class MainWindow(QMainWindow):
                     tolerance=TOLERANCES[d["tolerance"]],
                     warn_both=d["warn_both"])
         self.chart.fixed_max = float(d["graph_max"])
-        if not d["fit_overrides"]:
-            self.chart.fit_scale = False
+        self.set_timeline(d["timeline"])
         self.player.tail.setValue(d["preview_s"])
         self._autosave.setInterval(max(1, d["autosave_s"]) * 1000)
         self.refresh(keep_undo=True)
@@ -1599,26 +1606,20 @@ class MainWindow(QMainWindow):
         self.chart.set_data(self.tracks, seams(self.tracks), self.felt, sel)
         self._push_to_wheel()
 
-    def toggle_timeline(self):
-        on = self.btn_timeline.isChecked()
+    def set_timeline(self, on: bool):
+        """Timeline mode is a Display setting now, not a toolbar toggle."""
+        if (self.chart.mode() == "time") == on:
+            return
         self.chart_scroll.setWidgetResizable(not on)
         self.chart.set_mode("time" if on else "fit")
         if on:
-            self.zoom_fit()
-            self.status("Timeline — width is track length. Ctrl+wheel to zoom.")
+            # Start zoomed so the whole set fits; Ctrl+wheel zooms from there.
+            self.chart.set_zoom(self.chart.fit_zoom(
+                self.chart_scroll.viewport().width()))
+            self.chart.resize(self.chart.minimumWidth(),
+                              self.chart_scroll.viewport().height())
         else:
             self.chart.resize(self.chart_scroll.viewport().size())
-            self.status("Equal-width bars.")
-
-    def zoom_fit(self):
-        if self.display.get("fit_overrides"):
-            self.chart.set_fit_scale(True)
-        if self.chart.mode() != "time":
-            return
-        self.chart.set_zoom(self.chart.fit_zoom(
-            self.chart_scroll.viewport().width()))
-        self.chart.resize(self.chart.minimumWidth(),
-                          self.chart_scroll.viewport().height())
 
     def set_felt(self, felt: bool):
         self.felt = felt

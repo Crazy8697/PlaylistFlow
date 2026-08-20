@@ -302,11 +302,12 @@ class SettingsDialog(QDialog):
         form.addRow("", _note("Fixed axis maximum. Raise it if you listen to "
                               "anything above 200 BPM."))
 
-        self.d_fit_override = QCheckBox("Fit overrides graph max")
-        self.d_fit_override.setChecked(True)
-        form.addRow("", self.d_fit_override)
-        form.addRow("", _note("When the Fit button is used, rescale to the "
-                              "current playlist's range for that view."))
+        self.d_timeline = QCheckBox("Timeline mode")
+        self.d_timeline.setChecked(False)
+        form.addRow("", self.d_timeline)
+        form.addRow("", _note("Bar width becomes track length, so the set "
+                              "reads as elapsed time. Ctrl+wheel over the "
+                              "chart to zoom."))
 
         self.d_fold = spin("FELT_FOLD")
         form.addRow("<b>Fold threshold</b>", self.d_fold)
@@ -376,7 +377,7 @@ class SettingsDialog(QDialog):
 
         d = display_settings(env)
         self.d_graph_max.setValue(d["graph_max"])
-        self.d_fit_override.setChecked(d["fit_overrides"])
+        self.d_timeline.setChecked(d["timeline"])
         self.d_fold.setValue(d["felt_fold"])
         self.d_tol.setCurrentIndex(
             next(i for i, (_, v) in enumerate(TOL_ITEMS) if v == d["tolerance"]))
@@ -390,7 +391,7 @@ class SettingsDialog(QDialog):
         vals = {k: f.value() for k, f in self.fields.items()}
         vals.update({
             "GRAPH_MAX_BPM": str(self.d_graph_max.value()),
-            "FIT_OVERRIDES_MAX": "1" if self.d_fit_override.isChecked() else "0",
+            "TIMELINE_ON": "1" if self.d_timeline.isChecked() else "0",
             "FELT_FOLD": str(self.d_fold.value()),
             "TEMPO_TOLERANCE": TOL_ITEMS[self.d_tol.currentIndex()][1],
             "WARN_BOTH_OFF": "1" if self.d_warn_both.isChecked() else "0",

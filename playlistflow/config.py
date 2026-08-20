@@ -32,7 +32,7 @@ KEYS = (
     # Display settings. Same file as the keys on purpose: one place to look,
     # and they are catalog preferences, not per-playlist state.
     "GRAPH_MAX_BPM",
-    "FIT_OVERRIDES_MAX",
+    "TIMELINE_ON",
     "FELT_FOLD",
     "TEMPO_TOLERANCE",
     "WARN_BOTH_OFF",
@@ -76,7 +76,7 @@ def display_settings(env: dict | None = None) -> dict:
 
     return {
         "graph_max": num("GRAPH_MAX_BPM"),
-        "fit_overrides": flag("FIT_OVERRIDES_MAX"),
+        "timeline": flag("TIMELINE_ON", default=False),
         "felt_fold": num("FELT_FOLD"),
         "tolerance": tol,
         "warn_both": flag("WARN_BOTH_OFF"),

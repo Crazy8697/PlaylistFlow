@@ -124,6 +124,13 @@ QLabel#plcount { color: #8C939D; font-size: 12px; font-family: Consolas, monospa
 /* Inline buttons that share a text line. The default 7px padding makes a
    ~32px-tall button, which gets cropped when squeezed onto a label row. */
 QPushButton#inline { padding: 2px 10px; font-size: 11px; }
+/* Flat text buttons that sit on the menu bar line, styled to read like the
+   File/Edit/Help items rather than toolbar buttons. */
+QPushButton#menubtn {
+    background: transparent; border: none; color: #8C939D;
+    padding: 4px 12px; font-size: 13px;
+}
+QPushButton#menubtn:hover { background: #20242B; color: #E9E7E1; }
 /* Covers carry their own edge; a border keeps a dark album art from bleeding
    into the background, and holds the slot's shape before one has loaded. */
 QLabel#cover, QLabel#art { background: #181B21; border: 1px solid #2C313A; border-radius: 3px; }
