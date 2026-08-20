@@ -7,8 +7,9 @@ Two modes:
             and you can see where the long stretches sit. Scrolls and zooms.
 
 Hand-painted with QPainter — no charting library for something this simple.
-The baseline sits below the minimum value rather than at zero; with a 60-185
-range a zero baseline flattens every visible difference.
+Bars are drawn from zero, so height is proportional to BPM: a 122 next to a 78
+looks ~1.5x, not double. The old below-the-minimum baseline differentiated
+better but lied about ratios, which defeats reading tempo at a glance.
 
 There is no waveform here and there cannot be: Spotify never exposes the audio,
 and preview clips are gone. Everything drawn is derived from tempo, key and
@@ -171,8 +172,8 @@ class BarChart(QWidget):
         vals = [self._shown(t) for t in self._tracks if t.resolved]
         if not vals:
             return 1.0, 0.0
-        hi, lo = max(vals), min(vals)
-        return hi, max(0.0, lo - (hi - lo) * 0.3)
+        # Zero baseline: bar height must be honest about tempo ratios.
+        return max(vals), 0.0
 
     def _bar_rects(self) -> list[QRectF]:
         n = len(self._tracks)
