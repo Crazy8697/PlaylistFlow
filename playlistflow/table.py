@@ -466,7 +466,18 @@ class TrackTable(QTableWidget):
             x += fm.horizontalAdvance("tempo ") + 2
             p.setPen(QPen(QColor(s.tempo.colour)))
             p.drawText(x, y, s.tempo.txt)
-            x += fm.horizontalAdvance(s.tempo.txt) + 14
+            x += fm.horizontalAdvance(s.tempo.txt) + 6
+
+            # The raw pair the label was computed from. The BPM column shows
+            # felt, so without this the label can look wrong next to the
+            # numbers on screen.
+            if i + 1 < len(self._tracks):
+                ta, tb = self._tracks[i], self._tracks[i + 1]
+                if ta.bpm > 0 and tb.bpm > 0:
+                    pair = "%d→%d" % (round(ta.bpm), round(tb.bpm))
+                    p.setPen(QPen(FAINT))
+                    p.drawText(x, y, pair)
+                    x += fm.horizontalAdvance(pair) + 14
 
             if s.both:
                 p.setPen(QPen(BAD))

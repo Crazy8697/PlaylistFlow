@@ -95,13 +95,22 @@ class Track:
         return Track(**{k: v for k, v in d.items() if k in known})
 
 
+# Where the felt-BPM fold sits. A fixed fold always has a cliff; this one is
+# placed in the sparsest gap of the catalog's 130-160 zone (values run
+# ...143, 144, 144 -> 148, 148...) so it does not slice through a cluster.
+# The old fold at 130 cut straight through the middle of the upper cluster,
+# which made 138 and 129 display as 69 and 129 -- nine apart on screen for a
+# 7% difference in reality. Display/sort only; classification is on raw BPM.
+FELT_FOLD = 146
+
+
 def felt_bpm(bpm: float) -> float:
     """Half-time detection.
 
     In trap-influenced music the snare lands on beat 3 rather than 2 and 4,
-    so a track reported at 140 feels like 70.
+    so a fast-count track feels like half its reported tempo.
     """
-    return bpm / 2 if bpm >= 130 else bpm
+    return bpm / 2 if bpm >= FELT_FOLD else bpm
 
 
 def key_gap(a: Track, b: Track) -> float:
@@ -170,7 +179,9 @@ def classify_tempo(current_bpm: float, next_bpm: float, same_key: bool = False) 
     ratio = next_bpm / current_bpm
 
     # Clean relationships, checked nearest-first
-    if 0.98 <= ratio <= 1.02:
+    # Unison is at least as tolerant as doubling (+-6%), and reciprocal like
+    # every other window so A->B and B->A agree.
+    if (1 / 1.06) <= ratio <= 1.06:
         return "holds"
     if 1.88 <= ratio <= 2.12:
         return "doubles"
