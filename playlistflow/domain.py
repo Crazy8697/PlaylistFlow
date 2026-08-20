@@ -139,19 +139,71 @@ def key_label(g: float) -> Rel:
     return Rel("far apart", C_BAD, True)
 
 
+TEMPO_COLORS = {
+    "holds":   "#4ADE80",   # green
+    "doubles": "#4ADE80",   # green
+    "halves":  "#4ADE80",   # green
+    "shifts":  "#2DD4BF",   # teal — valid relationship, just not seamless
+    "drifts":  "#FBBF24",   # amber
+    "jumps":   "#F87171",   # red
+}
+
+# What the header's "clean" counter counts on the tempo axis.
+CLEAN_TEMPO = frozenset({"holds", "doubles", "halves", "shifts"})
+
+
+def classify_tempo(current_bpm: float, next_bpm: float, same_key: bool = False) -> str:
+    """
+    Classify the tempo relationship between two adjacent tracks.
+
+    Returns one of: holds, doubles, halves, shifts, drifts, jumps
+
+    Clean states:  holds, doubles, halves, shifts
+    Warnings:      drifts, jumps
+
+    If same_key is True, a jumps result is downgraded to drifts.
+    One axis off is survivable; both axes off breaks the seam.
+    """
+    if not current_bpm or not next_bpm:
+        return "jumps"
+
+    ratio = next_bpm / current_bpm
+
+    # Clean relationships, checked nearest-first
+    if 0.98 <= ratio <= 1.02:
+        return "holds"
+    if 1.88 <= ratio <= 2.12:
+        return "doubles"
+    if 0.47 <= ratio <= 0.53:
+        return "halves"
+    if 1.43 <= ratio <= 1.57:
+        return "shifts"
+    if 0.64 <= ratio <= 0.70:
+        return "shifts"
+
+    # Not clean — measure distance to the nearest valid ratio
+    valid_ratios = [1.0, 2.0, 0.5, 1.5, 0.667]
+    distance = min(abs(ratio - v) / v for v in valid_ratios)
+
+    if distance <= 0.08:
+        return "drifts"
+
+    return "drifts" if same_key else "jumps"
+
+
 def tempo_rel(a: Track, b: Track) -> Rel:
-    """Always computed on felt BPM, whichever view is displayed."""
-    x, y = felt_bpm(a.bpm), felt_bpm(b.bpm)
-    if x <= 0 or y <= 0:
+    """Classified on RAW BPM, not felt: doubles/halves detect the octave
+    relationship explicitly, and felt-halving would erase the direction the
+    labels exist to show. Felt stays a display/sort concern.
+
+    same_key downgrades jumps to drifts — a stretched double in the same key
+    holds by ear; the same stretch across a key change does not.
+    """
+    if a.bpm <= 0 or b.bpm <= 0:
         return Rel("—", "#5C636D", False)
-    r = max(x, y) / min(x, y)
-    if r <= 1.07:
-        return Rel("locked", C_OK, False)
-    if abs(r - 2) / 2 <= 0.07:
-        return Rel("half-time", C_OK, False)
-    if r <= 1.20:
-        return Rel("drifts", C_WARN, False)
-    return Rel("jumps", C_BAD, True)
+    same_key = a.n > 0 and a.n == b.n and a.letter == b.letter
+    label = classify_tempo(a.bpm, b.bpm, same_key=same_key)
+    return Rel(label, TEMPO_COLORS[label], label == "jumps")
 
 
 def seam_key(a: Track, b: Track) -> str:
@@ -193,9 +245,12 @@ def seams(tracks: list[Track], approved=None) -> list[Seam]:
                             Rel("—", "#5C636D", False), False, known=False,
                             checked=ok))
             continue
-        k = key_label(key_gap(a, b))
+        g = key_gap(a, b)
+        k = key_label(g)
         t = tempo_rel(a, b)
-        out.append(Seam(k, t, k.bad and t.bad, known=True, checked=ok))
+        # Both-axes-off: tempo jumps AND the key is worse than one step.
+        both = t.txt == "jumps" and g > 1
+        out.append(Seam(k, t, both, known=True, checked=ok))
     return out
 
 
@@ -203,7 +258,8 @@ def summary(tracks: list[Track], approved=None) -> str:
     sm = seams(tracks, approved)
     # A seam nobody can judge yet is not a clean seam.
     judged = [s for s in sm if s.known]
-    clean = sum(1 for s in judged if not s.key.bad and not s.tempo.bad)
+    clean = sum(1 for s in judged
+                if not s.key.bad and s.tempo.txt in CLEAN_TEMPO)
     both = sum(1 for s in judged if s.both)
     unresolved = sum(1 for t in tracks if not t.resolved)
     # The track count lives with the playlist name in the bottom strip now.
