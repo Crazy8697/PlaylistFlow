@@ -95,13 +95,30 @@ class Track:
         return Track(**{k: v for k, v in d.items() if k in known})
 
 
-# Where the felt-BPM fold sits. A fixed fold always has a cliff; this one is
-# placed in the sparsest gap of the catalog's 130-160 zone (values run
-# ...143, 144, 144 -> 148, 148...) so it does not slice through a cluster.
-# The old fold at 130 cut straight through the middle of the upper cluster,
-# which made 138 and 129 display as 69 and 129 -- nine apart on screen for a
-# 7% difference in reality. Display/sort only; classification is on raw BPM.
-FELT_FOLD = 146
+# Where the felt-BPM fold sits. A fixed fold always has a cliff, so it is a
+# Display setting now (default 165 -- the top of the range a listener can
+# track as a pulse). Display/sort only; classification is on raw BPM.
+FELT_FOLD = 165
+
+# Half-width of the clean windows, multiplicative. A Display setting:
+# tight 0.03 for blended sets, normal 0.06, loose 0.08 for cut sets.
+TEMPO_TOL = 0.06
+
+# Whether both-axes-off is computed and shown at all. A Display setting.
+WARN_BOTH = True
+
+
+def set_display(felt_fold: int = None, tolerance: float = None,
+                warn_both: bool = None) -> None:
+    """Apply Display settings. Module-level on purpose: every classification
+    site reads the same values, and the caller re-runs seams() after."""
+    global FELT_FOLD, TEMPO_TOL, WARN_BOTH
+    if felt_fold is not None:
+        FELT_FOLD = felt_fold
+    if tolerance is not None:
+        TEMPO_TOL = tolerance
+    if warn_both is not None:
+        WARN_BOTH = warn_both
 
 
 def felt_bpm(bpm: float) -> float:
@@ -178,20 +195,19 @@ def classify_tempo(current_bpm: float, next_bpm: float, same_key: bool = False) 
 
     ratio = next_bpm / current_bpm
 
-    # Clean relationships, checked nearest-first
-    # Unison is at least as tolerant as doubling (+-6%), and reciprocal like
-    # every other window so A->B and B->A agree.
-    if (1 / 1.06) <= ratio <= 1.06:
+    # Clean windows, nearest-first. All derived from one tolerance so the
+    # presets scale them together; every window is v/(1+t) .. v*(1+t), which
+    # makes A->B and B->A agree by construction, holds included.
+    t = 1 + TEMPO_TOL
+    if (1 / t) <= ratio <= t:
         return "holds"
-    if 1.88 <= ratio <= 2.12:
+    if (2 / t) <= ratio <= (2 * t):
         return "doubles"
-    # Down-windows are exact reciprocals of the up-windows, so A->B and B->A
-    # always classify as the same relationship.
-    if (1 / 2.12) <= ratio <= (1 / 1.88):
+    if (1 / (2 * t)) <= ratio <= (t / 2):
         return "halves"
-    if 1.43 <= ratio <= 1.57:
+    if (1.5 / t) <= ratio <= (1.5 * t):
         return "shifts"
-    if (1 / 1.57) <= ratio <= (1 / 1.43):
+    if (1 / (1.5 * t)) <= ratio <= (t / 1.5):
         return "shifts"
 
     # Not clean — measure distance to the nearest valid ratio
@@ -263,7 +279,7 @@ def seams(tracks: list[Track], approved=None) -> list[Seam]:
         t = tempo_rel(a, b)
         # Both-axes-off: tempo jumps AND the key is worse than two steps.
         # The diagonal (1.5) is a preferred transition, not a degraded one.
-        both = t.txt == "jumps" and g > 2
+        both = WARN_BOTH and t.txt == "jumps" and g > 2
         out.append(Seam(k, t, both, known=True, checked=ok))
     return out
 

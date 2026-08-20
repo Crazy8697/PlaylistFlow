@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QRadioButton, QComboBox, QButtonGroup,
 )
 
-from .domain import Track, seams, summary, valid_key, felt_bpm, seam_key
+from .domain import Track, seams, summary, valid_key, felt_bpm, seam_key, set_display
 from .providers import Spotify, FreqBlog, GetSongBPM, ProviderError, Features
 from .auth import SpotifyAuth, AuthError
 from .keys import clean_title, primary_artist
@@ -25,7 +25,7 @@ from .store import Store
 from pathlib import Path
 
 from . import __version__, __url__
-from .config import Prefs, load_env, missing_required
+from .config import Prefs, load_env, missing_required, display_settings, TOLERANCES
 from .settings import SettingsDialog
 from .chart import BarChart
 from .table import TrackTable, COL_BPM, COL_KEY
@@ -484,6 +484,8 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._build_menu()
         self._build_shortcuts()
+        self._dirty = False
+        self._apply_display()
         self._restore_layout()
         QTimer.singleShot(0, self._start)
 
@@ -973,6 +975,26 @@ class MainWindow(QMainWindow):
         self.freqblog.api_key = self.env.get("FREQBLOG_API_KEY", "")
         self.getsongbpm.api_key = self.env.get("GETSONGBPM_API_KEY", "")
         self.web.api_key = self.env.get("BRAVE_API_KEY", "")
+        self._apply_display()
+
+    def _apply_display(self):
+        """Push Display settings into the modules that read them.
+
+        Cheap ones (graph max, fold) apply by repaint; the tolerance changes
+        what classify_tempo returns, so refresh() re-runs seams afterwards —
+        that IS the reclassify.
+        """
+        d = display_settings(self.env)
+        self.display = d
+        set_display(felt_fold=d["felt_fold"],
+                    tolerance=TOLERANCES[d["tolerance"]],
+                    warn_both=d["warn_both"])
+        self.chart.fixed_max = float(d["graph_max"])
+        if not d["fit_overrides"]:
+            self.chart.fit_scale = False
+        self.player.tail.setValue(d["preview_s"])
+        self._autosave.setInterval(max(1, d["autosave_s"]) * 1000)
+        self.refresh(keep_undo=True)
 
     def _ensure_storage(self):
         d = self.prefs.storage_dir
@@ -1021,6 +1043,7 @@ class MainWindow(QMainWindow):
         self.current_desc = self.store.last_loaded_desc
         self.approved = set(self.store.last_loaded_checked)
         self.current_name = name
+        self._dirty = False
         self.refresh()
         self.load_details()
         self.status(f"Loaded {name} — {len(self.tracks)} tracks.")
@@ -1074,10 +1097,13 @@ class MainWindow(QMainWindow):
         self.store.save(name, self.tracks, auto=False, pid=self.current_pid,
                         description=self.current_desc,
                         ear_checked=sorted(self.approved))
+        self._dirty = False
         self.refresh_saved()
         self.status(f"Saved {name}.")
 
     def _write_auto(self):
+        if not self.display.get("autosave_on", True):
+            return
         if self.store and self.current_name and self.tracks:
             self.store.save(self.current_name, self.tracks, auto=True,
                             pid=self.current_pid, description=self.current_desc,
@@ -1086,6 +1112,7 @@ class MainWindow(QMainWindow):
     # ---------------- undo ----------------
 
     def snapshot(self):
+        self._dirty = True
         self.undo_stack.append(copy.deepcopy(self.tracks))
         if len(self.undo_stack) > UNDO_CAP:
             self.undo_stack.pop(0)
@@ -1278,6 +1305,7 @@ class MainWindow(QMainWindow):
         # exists; pair-keying means they fit the fresh list safely.
         meta = self.store.meta(self.current_name) if self.store else {}
         self.approved = set(meta.get("ear_checked", []))
+        self._dirty = False
         self.refresh()
         self.load_details()
         cached = sum(1 for t in self.tracks if t.resolved)
@@ -1583,6 +1611,8 @@ class MainWindow(QMainWindow):
             self.status("Equal-width bars.")
 
     def zoom_fit(self):
+        if self.display.get("fit_overrides"):
+            self.chart.set_fit_scale(True)
         if self.chart.mode() != "time":
             return
         self.chart.set_zoom(self.chart.fit_zoom(
@@ -2043,6 +2073,23 @@ class MainWindow(QMainWindow):
         self.prefs.set_splitter("v", self.vsplit.saveState())
 
     def closeEvent(self, e):
+        if self._dirty and self.tracks and self.store:
+            name = self.current_name or "this playlist"
+            ans = QMessageBox.question(
+                self, "Unsaved changes",
+                f"Save changes to '{name}' before closing?",
+                QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+                QMessageBox.Save)
+            if ans == QMessageBox.Cancel:
+                e.ignore()
+                return
+            if ans == QMessageBox.Save:
+                self.save_playlist()
+                if self._dirty:
+                    # The name prompt was cancelled — nothing was written, so
+                    # do not let the close eat the work either.
+                    e.ignore()
+                    return
         self._save_layout()
         if self.worker and self.worker.isRunning():
             self.worker.stop()

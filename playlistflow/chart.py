@@ -168,12 +168,26 @@ class BarChart(QWidget):
             out.append(QRectF(edges[i], y, w, STRIP_H))
         return out
 
+    # Display settings: a fixed y-axis maximum keeps bar heights comparable
+    # across playlists; Fit can override it for the current view.
+    fixed_max: float = 0.0        # 0 = scale to the data
+    fit_scale: bool = False       # set by the Fit button when the override is on
+
+    def set_fit_scale(self, on: bool):
+        self.fit_scale = on
+        self.update()
+
     def _scale(self) -> tuple[float, float]:
         vals = [self._shown(t) for t in self._tracks if t.resolved]
         if not vals:
             return 1.0, 0.0
-        # Zero baseline: bar height must be honest about tempo ratios.
-        return max(vals), 0.0
+        data_hi = max(vals)
+        # Zero baseline: bar height must be honest about tempo ratios. The
+        # fixed ceiling never CLIPS -- data above it takes over rather than
+        # overflowing the plot.
+        if self.fixed_max > 0 and not self.fit_scale:
+            return max(self.fixed_max, data_hi), 0.0
+        return data_hi, 0.0
 
     def _bar_rects(self) -> list[QRectF]:
         n = len(self._tracks)

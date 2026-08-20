@@ -29,7 +29,61 @@ KEYS = (
     "FREQBLOG_API_KEY",
     "GETSONGBPM_API_KEY",
     "BRAVE_API_KEY",
+    # Display settings. Same file as the keys on purpose: one place to look,
+    # and they are catalog preferences, not per-playlist state.
+    "GRAPH_MAX_BPM",
+    "FIT_OVERRIDES_MAX",
+    "FELT_FOLD",
+    "TEMPO_TOLERANCE",
+    "WARN_BOTH_OFF",
+    "PREVIEW_SECONDS",
+    "AUTOSAVE_ON",
+    "AUTOSAVE_SECONDS",
 )
+
+# name -> (default, lo, hi) for the numeric display settings
+DISPLAY_DEFAULTS = {
+    "GRAPH_MAX_BPM": (200, 60, 300),
+    "FELT_FOLD": (165, 100, 200),
+    "PREVIEW_SECONDS": (20, 5, 60),
+    "AUTOSAVE_SECONDS": (2, 1, 300),
+}
+TOLERANCES = {"tight": 0.03, "normal": 0.06, "loose": 0.08}
+
+
+def display_settings(env: dict | None = None) -> dict:
+    """Typed display settings out of the .env strings, defaults applied."""
+    env = env if env is not None else load_env()
+
+    def num(key):
+        default, lo, hi = DISPLAY_DEFAULTS[key]
+        try:
+            return min(hi, max(lo, int(float(env.get(key, "")))))
+        except (TypeError, ValueError):
+            return default
+
+    def flag(key, default=True):
+        v = str(env.get(key, "")).strip().lower()
+        if v in ("1", "true", "on", "yes"):
+            return True
+        if v in ("0", "false", "off", "no"):
+            return False
+        return default
+
+    tol = str(env.get("TEMPO_TOLERANCE", "")).strip().lower()
+    if tol not in TOLERANCES:
+        tol = "normal"
+
+    return {
+        "graph_max": num("GRAPH_MAX_BPM"),
+        "fit_overrides": flag("FIT_OVERRIDES_MAX"),
+        "felt_fold": num("FELT_FOLD"),
+        "tolerance": tol,
+        "warn_both": flag("WARN_BOTH_OFF"),
+        "preview_s": num("PREVIEW_SECONDS"),
+        "autosave_on": flag("AUTOSAVE_ON"),
+        "autosave_s": num("AUTOSAVE_SECONDS"),
+    }
 
 # Keys without which the app cannot do its job.
 REQUIRED = ("SPOTIFY_CLIENT_ID", "FREQBLOG_API_KEY")
