@@ -206,7 +206,8 @@ def summary(tracks: list[Track], approved=None) -> str:
     clean = sum(1 for s in judged if not s.key.bad and not s.tempo.bad)
     both = sum(1 for s in judged if s.both)
     unresolved = sum(1 for t in tracks if not t.resolved)
-    bits = [f"{len(tracks)} tracks"]
+    # The track count lives with the playlist name in the bottom strip now.
+    bits = []
     # Lead with what is still missing — that is the number being watched while
     # a fetch runs.
     if unresolved:

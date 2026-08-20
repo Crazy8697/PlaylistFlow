@@ -708,6 +708,9 @@ class MainWindow(QMainWindow):
         self.pl_name = QLabel("No playlist open")
         self.pl_name.setObjectName("plname")
         head_row.addWidget(self.pl_name)
+        self.pl_count = QLabel("")
+        self.pl_count.setObjectName("plcount")
+        head_row.addWidget(self.pl_count)
         head_row.addStretch(1)
         self.btn_desc = QPushButton("Save description")
         self.btn_desc.setToolTip(
@@ -1944,9 +1947,28 @@ class MainWindow(QMainWindow):
             return
         self.status("Description saved to Spotify.")
 
+    @staticmethod
+    def _fmt_total(ms: int) -> str:
+        s = int(ms // 1000)
+        h, rem = divmod(s, 3600)
+        m, sec = divmod(rem, 60)
+        return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
+
     def show_playlist_info(self):
         """Refresh the bottom strip from whatever is currently open."""
         self.pl_name.setText(self.current_name or "No playlist open")
+        if self.tracks:
+            total = sum(t.duration_ms for t in self.tracks if t.duration_ms > 0)
+            missing = sum(1 for t in self.tracks if t.duration_ms <= 0)
+            n = len(self.tracks)
+            txt = f"{n} track{'s' if n != 1 else ''}"
+            if total:
+                # A "+" marks a total that undercounts because some rows have
+                # no known length (manually added tracks).
+                txt += f"  ·  {self._fmt_total(total)}{'+' if missing else ''}"
+            self.pl_count.setText(txt)
+        else:
+            self.pl_count.setText("")
         if self.pl_desc.toPlainText().strip() != (self.current_desc or ""):
             self.pl_desc.setPlainText(self.current_desc or "")
         self.btn_desc.setEnabled(bool(self.current_name))
