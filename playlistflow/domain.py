@@ -174,11 +174,13 @@ def classify_tempo(current_bpm: float, next_bpm: float, same_key: bool = False) 
         return "holds"
     if 1.88 <= ratio <= 2.12:
         return "doubles"
-    if 0.47 <= ratio <= 0.53:
+    # Down-windows are exact reciprocals of the up-windows, so A->B and B->A
+    # always classify as the same relationship.
+    if (1 / 2.12) <= ratio <= (1 / 1.88):
         return "halves"
     if 1.43 <= ratio <= 1.57:
         return "shifts"
-    if 0.64 <= ratio <= 0.70:
+    if (1 / 1.57) <= ratio <= (1 / 1.43):
         return "shifts"
 
     # Not clean — measure distance to the nearest valid ratio
@@ -248,8 +250,9 @@ def seams(tracks: list[Track], approved=None) -> list[Seam]:
         g = key_gap(a, b)
         k = key_label(g)
         t = tempo_rel(a, b)
-        # Both-axes-off: tempo jumps AND the key is worse than one step.
-        both = t.txt == "jumps" and g > 1
+        # Both-axes-off: tempo jumps AND the key is worse than two steps.
+        # The diagonal (1.5) is a preferred transition, not a degraded one.
+        both = t.txt == "jumps" and g > 2
         out.append(Seam(k, t, both, known=True, checked=ok))
     return out
 
