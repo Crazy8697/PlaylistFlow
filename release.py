@@ -51,7 +51,7 @@ def main():
 
     setup = ROOT / f"PlaylistFlow-Setup-{tag}-win64.exe"
     if ISCC.exists():
-        run(ISCC, f"/DAppVersion={__version__}", "/Qp", "installer.iss")
+        run(ISCC, f"/DAppVersion={__version__}", "/Qp", "_installer.iss")
         built = ROOT / f"PlaylistFlow-Setup-{tag}.exe"
         if built.exists():
             built.replace(setup)
