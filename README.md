@@ -104,12 +104,27 @@ Used only for tracks nothing else can resolve. Its BPM is usually right; its
 
 ## Install
 
-### Option A — just run it
+### Option A — the installer (recommended)
 
-Grab the built folder, put it anywhere, and run `PlaylistFlow.exe`. Make a
-desktop shortcut to that exe if you want one.
+Download **`PlaylistFlow-Setup-vX.Y.Z-win64.exe`** from the
+[latest release](https://github.com/Crazy8697/PlaylistFlow/releases/latest)
+and run it. No admin prompt — it installs per-user into
+`%LOCALAPPDATA%\Programs\PlaylistFlow` with a Start menu entry, an optional
+desktop shortcut, and a normal uninstall entry in Apps.
 
-### Option B — from source
+> Windows SmartScreen will warn on first run because the exe is unsigned:
+> **More info → Run anyway.**
+
+The app checks for updates a few seconds after startup and offers them —
+downloads, swaps itself, and restarts. **Help → Check for updates…** does the
+same on demand. Uninstalling never touches your keys or saved playlists.
+
+### Option B — portable zip
+
+Grab **`PlaylistFlow-vX.Y.Z-win64.zip`** from the same release, unzip it
+anywhere writable, run `PlaylistFlow.exe`. The self-updater works here too.
+
+### Option C — from source
 
 Needs **Python 3.11 or newer** from [python.org](https://www.python.org/downloads/)
 (tick *Add Python to PATH* during install).
@@ -129,17 +144,23 @@ py -m venv .venv
 
 ```bat
 .venv\Scripts\python makeicon.py assets
-
-.venv\Scripts\python -m PyInstaller --noconfirm --windowed --onedir ^
-  --name PlaylistFlow --icon assets\icon.ico --add-data "assets;assets" ^
-  --exclude-module matplotlib --exclude-module numpy ^
-  --exclude-module PySide6.QtWebEngineCore --exclude-module PySide6.QtMultimedia ^
-  main.py
-
-copy dist\PlaylistFlow\_internal\assets\icon.ico dist\PlaylistFlow\icon.ico
+.venv\Scripts\python -m PyInstaller PlaylistFlow.spec --noconfirm
 ```
 
 Result lands in `dist\PlaylistFlow\`.
+
+### Cutting a release
+
+Bump `__version__` in `playlistflow/__init__.py`, then:
+
+```bat
+.venv\Scripts\python release.py
+```
+
+Builds, zips, compiles the installer from `_installer.iss` (needs Inno Setup 6),
+and publishes both to GitHub Releases via `gh`. It refuses to package if a
+`.env` is anywhere in the build. Everyone on an older build gets offered the
+update on next launch.
 
 `--onedir`, not `--onefile`. Onefile unpacks ~150 MB to a temp directory on
 every single launch, which costs several seconds each time. Onedir starts
@@ -184,8 +205,8 @@ Change any of this later under **File → Settings…**
 | **Sort: key** / **Sort: BPM** | Straight sort; click again to reverse |
 | Double-click a track | Plays it and everything after it, in the order shown here |
 | **Preview transition** | Plays the tail of the selected track into the next one |
-| **Timeline** | Bar width becomes track length; Ctrl+wheel zooms |
-| **Push order to Spotify** | Reorders the real playlist to match |
+| Settings → Display → **Timeline mode** | Bar width becomes track length; Ctrl+wheel zooms |
+| **Push to Spotify** | Adds what's missing, offers removals, reorders to match |
 
 | Key | |
 |---|---|
@@ -193,6 +214,9 @@ Change any of this later under **File → Settings…**
 | `Ctrl+↑` `Ctrl+↓` | move the selected track |
 | `Ctrl+B` | jump to the next missing BPM or key and start typing |
 | `Ctrl+P` | preview the transition |
+| `Ctrl+M` | mark the selected transition as ear-checked |
+| `Ctrl+Shift+F` | bulk track finder |
+| `Ctrl+E` | export the URI block |
 | `Ctrl+F` | fetch |
 | `Ctrl+Z` | undo |
 
@@ -227,8 +251,8 @@ replaced wholesale every time the exe is rebuilt.
 Tuned by ear against a real library. Don't "improve" them.
 
 ```python
-def felt_bpm(bpm):                            # trap snare lands on 3,
-    return bpm / 2 if bpm >= 130 else bpm     # so 140 feels like 70
+def felt_bpm(bpm):                                # trap snare lands on 3, so a
+    return bpm / 2 if bpm >= FELT_FOLD else bpm   # fast count feels half-time
 
 def key_gap(a, b):
     d = min((a.n - b.n) % 12, (b.n - a.n) % 12)
@@ -241,14 +265,19 @@ def key_gap(a, b):
 not on the standard harmonic-mixing compatibility list. It gets its own
 category anyway, because it works.
 
-Tempo, always computed on felt BPM:
+Tempo is classified on **raw** BPM (felt is display-only — the fold point is a
+Display setting, default 165). Every window derives from one tolerance
+(Settings → Display: tight ±3% / normal ±6% / loose ±8%), reciprocal by
+construction so A→B and B→A always agree:
 
-| ratio | reads as | a problem? |
+| ratio near | reads as | a problem? |
 |---|---|---|
-| ≤ 1.07 | locked | no |
-| ≈ 2 (±7%) | half-time | no |
-| ≤ 1.20 | drifts | no |
-| anything else | jumps | yes |
+| 1 | holds | no |
+| 2 | doubles | no |
+| ½ | halves | no |
+| 3:2 or 2:3 | shifts | no — valid, just not seamless |
+| within 8% of any of those | drifts | soft warning |
+| anything else | jumps | yes (downgraded to drifts in the same key) |
 
 Key and tempo are judged independently. **One axis off is survivable. Both off
 is where it breaks** — and only that gets a hard warning.
@@ -293,14 +322,15 @@ Written down because they cost real time to work out:
 
 ## Tests
 
+All ad hoc scripts live in `tests/` and run from anywhere:
+
 ```bat
-.venv\Scripts\python selftest.py        REM key gaps, felt BPM, tempo, seams
-.venv\Scripts\python testdrag.py        REM reorder integrity
-.venv\Scripts\python testsort.py        REM sort order
-.venv\Scripts\python testkeys.py        REM key names to Camelot
-.venv\Scripts\python testblank.py       REM walking the missing values
-.venv\Scripts\python testgaps.py        REM timeline strip spacing
-.venv\Scripts\python testchartdrag.py   REM chart drag targets
+.venv\Scripts\python tests\selftest.py        REM key gaps, felt BPM, tempo, seams
+.venv\Scripts\python tests\testdrag.py        REM reorder integrity
+.venv\Scripts\python tests\testkeys.py        REM key names to Camelot
+.venv\Scripts\python tests\testearcheck.py    REM ear-checked seams
+.venv\Scripts\python tests\testdisplay.py     REM Display settings + exit prompt
+.venv\Scripts\python tests\testchartdrag.py   REM chart drag targets
 ```
 
 Keep the drag tests. Qt's `InternalMove` deletes the dragged row *after*
