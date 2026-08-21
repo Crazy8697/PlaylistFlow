@@ -21,6 +21,7 @@ from playlistflow import __version__          # noqa: E402
 
 ROOT = Path(__file__).parent
 DIST = ROOT / "dist" / "PlaylistFlow"
+ISCC = Path.home() / "AppData/Local/Programs/Inno Setup 6/ISCC.exe"
 
 
 def run(*cmd):
@@ -48,12 +49,24 @@ def main():
                 z.write(p, p.relative_to(DIST))
     print(f"wrote {out.name}  ({out.stat().st_size // 1048576} MB)")
 
+    setup = ROOT / f"PlaylistFlow-Setup-{tag}-win64.exe"
+    if ISCC.exists():
+        run(ISCC, f"/DAppVersion={__version__}", "/Qp", "installer.iss")
+        built = ROOT / f"PlaylistFlow-Setup-{tag}.exe"
+        if built.exists():
+            built.replace(setup)
+        print(f"wrote {setup.name}  ({setup.stat().st_size // 1048576} MB)")
+    else:
+        setup = None
+        print("Inno Setup not found - shipping zip only")
+
     if zip_only:
         return
     notes = subprocess.run(
         ["git", "log", "-1", "--pretty=%s"], capture_output=True, text=True,
         cwd=ROOT).stdout.strip()
-    run("gh", "release", "create", tag, str(out),
+    assets = [str(out)] + ([str(setup)] if setup else [])
+    run("gh", "release", "create", tag, *assets,
         "--title", f"Playlist Flow {tag}",
         "--notes", notes or f"Playlist Flow {tag}")
     print(f"published {tag}")

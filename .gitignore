@@ -24,3 +24,7 @@ assets/icon_*.png
 staging/
 build_staging/
 dist/PlaylistFlow.prev/
+
+# Release artifacts — published to GitHub Releases, never committed
+PlaylistFlow-*.zip
+PlaylistFlow-Setup-*.exe
