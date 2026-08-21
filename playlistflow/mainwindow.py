@@ -35,6 +35,7 @@ from .brand import spotify_icon, spotify_pixmap, icon_size
 from .artwork import about_pixmap, icon_pixmap, remote_pixmap
 from .wheel import KeyWheelDialog
 from .websearch import BraveLookup
+from .updater import check_update, UpdateWorker, apply_update, can_self_update
 from .finderdialog import FinderDialog
 
 UNDO_CAP = 40
@@ -488,6 +489,8 @@ class MainWindow(QMainWindow):
         self._apply_display()
         self._restore_layout()
         QTimer.singleShot(0, self._start)
+        if can_self_update():
+            QTimer.singleShot(3000, lambda: self.check_updates(quiet=True))
 
     def _start(self):
         self._first_run()
@@ -822,6 +825,9 @@ class MainWindow(QMainWindow):
             e.addAction(a)
 
         h = self.menuBar().addMenu("&Help")
+        a = QAction("Check for &updates…", self)
+        a.triggered.connect(lambda: self.check_updates(quiet=False))
+        h.addAction(a)
         corner = QWidget()
         cw = QHBoxLayout(corner)
         cw.setContentsMargins(0, 0, 6, 0)
@@ -952,6 +958,71 @@ class MainWindow(QMainWindow):
             self.status(f"Took the web value for '{t.title}'.")
 
     # ---------------- storage ----------------
+
+    def check_updates(self, quiet: bool = True):
+        """Ask GitHub for a newer release.
+
+        quiet=True is the startup path: silence unless something is found.
+        The check runs in a thread — an updater must never stall the UI.
+        """
+        if not can_self_update() and not quiet:
+            QMessageBox.information(
+                self, "Updates",
+                "Running from source — update with git pull instead.")
+            return
+
+        class _Check(QThread):
+            found = Signal(object)
+
+            def run(self):
+                self.found.emit(check_update())
+
+        self._upd_check = _Check(self)
+        self._upd_check.found.connect(
+            lambda info: self._update_found(info, quiet))
+        self._upd_check.start()
+
+    def _update_found(self, info, quiet: bool):
+        if not info:
+            if not quiet:
+                QMessageBox.information(self, "Updates",
+                                        "You are on the latest version.")
+            return
+        notes = info["notes"]
+        if len(notes) > 600:
+            notes = notes[:600] + "…"
+        if QMessageBox.question(
+            self, "Update available",
+            f"Playlist Flow {info['version']} is available "
+            f"(you have {__version__})." "\n\n"
+            f"{notes}" "\n\n"
+            "Download and install now? The app restarts by itself.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes if not quiet else QMessageBox.No,
+        ) != QMessageBox.Yes:
+            self.status(f"Update {info['version']} available — Help → Check for updates.")
+            return
+
+        self.busy_on("Downloading update…")
+        self._upd_worker = UpdateWorker(info["url"], info["size"], self)
+        self._upd_worker.progress.connect(
+            lambda d, t: self.status(
+                f"Downloading update… {d // 1048576} / {max(1, t // 1048576)} MB"))
+        self._upd_worker.ready.connect(self._update_ready)
+        self._upd_worker.failed.connect(self._update_failed)
+        self._upd_worker.start()
+
+    def _update_ready(self, staging: str):
+        self.busy_off()
+        apply_update(staging)
+        self.status("Restarting to finish the update…")
+        # closeEvent still runs: autosave flush, layout save, unsaved prompt.
+        self.close()
+
+    def _update_failed(self, msg: str):
+        self.busy_off()
+        QMessageBox.warning(self, "Update failed",
+                            f"{msg}" "\n\n" "Nothing was changed.")
 
     def _first_run(self):
         """Nothing works without the two required keys, so ask up front rather
