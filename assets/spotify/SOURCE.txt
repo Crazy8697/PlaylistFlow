@@ -1,0 +1,17 @@
+Spotify logo files, official, unmodified.
+
+Source: Spotify for Developers, Design & Branding Guidelines
+  https://developer.spotify.com/documentation/design
+  "Download Full Logo": https://developer.spotify.com/images/guidelines/design/2024-spotify-full-logo.zip
+  "Download Icon":      https://developer.spotify.com/images/guidelines/design/2024-spotify-logo-icon.zip
+Downloaded 2026-10-17. Files taken from those archives as-is (the zips carry no
+separate license or terms file):
+  Spotify_Full_Logo_RGB_White.png      (full logo, white, 3432 x 940)
+  Spotify_Primary_Logo_RGB_White.png   (icon, white, 939 x 940)
+
+Use is governed by the Spotify Developer Terms and the Design & Branding
+Guidelines: white monochrome on dark backgrounds (green only on pure black or
+white), full logo at least 70 px wide, icon at least 21 px, exclusion zone of half
+the icon's height, no recolouring, rotating, stretching or other changes, and only
+to attribute Spotify content. Never on action buttons, never paired with another
+brand. The program only scales these images down.

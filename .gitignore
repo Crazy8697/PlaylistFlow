@@ -1,0 +1,42 @@
+# Secrets, never commit. See .env.example for the shape.
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# exact private values for tools/privacy_check.py, never committed
+tools/privacy-local.txt
+
+# Build output
+build/
+dist/
+*.spec
+# ...except the one build.ps1 uses, which is source.
+!PlaylistFlow.spec
+
+# Virtualenv
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Generated icons (rebuild with makeicon.py)
+assets/icon_*.png
+# ...but the artwork they are generated FROM is source, not output.
+!assets/icon_source.png
+
+# Scratch
+*.log
+
+staging/
+build_staging/
+dist/PlaylistFlow.prev/
+
+# Release artifacts, published to GitHub Releases, never committed
+PlaylistFlow-*.zip
+PlaylistFlow-Setup-*.exe
+*.sha256
+*.zip
+update-staging/

@@ -1,0 +1,9 @@
+# What git archive (and so the public source sync in build.ps1 -Release) leaves out.
+# The developer and integration test scripts use real playlists, real Spotify ids and real
+# sign-ins; they stay in the private repo. The self-contained, synthetic suites go public.
+tests/** export-ignore
+tests/testupdater.py -export-ignore
+tests/testwizard.py -export-ignore
+tests/testkeypopups.py -export-ignore
+tests/testagreement.py -export-ignore
+tests/shotall.py -export-ignore

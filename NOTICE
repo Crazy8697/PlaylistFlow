@@ -1,0 +1,12 @@
+Playlist Flow
+Copyright 2026 DarkRelay (Crazy8697)
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+The Windows build of Playlist Flow includes third-party components, each under
+its own license. They are listed in THIRD-PARTY-NOTICES.md, and their license
+texts are in the licenses folder next to the program.
+
+The Spotify logo files in assets/spotify are trademarks of Spotify AB, used
+under Spotify's Design & Branding Guidelines. They are not covered by the
+Apache License.
