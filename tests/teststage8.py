@@ -463,7 +463,7 @@ class SpyWorker:
     def __init__(self, fb, gs, jobs, parent=None):
         made.append(list(jobs))
         self.resolved = self.waiting = self.message = self.done = self.keyRejected = \
-            type("S", (), {"connect": lambda self, f: None})()
+            self.hint = self.allowanceUsed = type("S", (), {"connect": lambda self, f: None})()
 
     def start(self):
         pass

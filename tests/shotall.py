@@ -301,6 +301,18 @@ mw.DocDialog("TERMS.md", w).exec()
 _name["next"] = "43-disconnect-spotify"
 mw.DisconnectDialog(w.prefs.storage_dir, w).exec()
 
+# ---- Stage 10: FreqBlog's hint while fetching, and the allowance running out ----
+w.busy_on("Looking up 40 track(s)…")
+w._show_hint("12 of 20 tracks are still being analysed. Send them again in about a minute "
+             "to collect them.")
+save(w, "70-main-freqblog-hint", (1440, 900))
+w._fetch_done()
+from playlistflow.providers import Usage as _U
+w._warned.discard("FreqBlog allowance")
+_name["next"] = "71-freqblog-allowance-used"
+w._allowance_used(_U(used=1000, quota=1000, pct=100.0, reset="2026-11-01"))
+save(w, "72-main-after-allowance-used", (1440, 900))
+
 # ---- Stage 9: the agreement on its own at startup, for users already set up ----
 w.prefs.agreement_version = "2026-10-17"
 ag = wz.AgreementDialog(w.prefs)

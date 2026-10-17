@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Iterable, Optional
 
 import html
+import threading
 import time
 
 import requests
@@ -35,7 +36,9 @@ class KeyRejected(RuntimeError):
 
 
 RATE_LIMIT_TRIES = 3
-RATE_LIMIT_MAX_WAIT = 10.0
+RATE_LIMIT_MAX_WAIT = 10.0           # GetSongBPM only (it sends no Retry-After of note)
+FREQBLOG_429_TRIES = 6               # concurrency 429s waited out, each for its full Retry-After
+FREQBLOG_MAX_WAIT = 120.0            # a longer Retry-After isn't waited out inside a fetch
 
 
 def retry_after(r, attempt: int) -> float:
@@ -44,6 +47,34 @@ def retry_after(r, attempt: int) -> float:
         return min(RATE_LIMIT_MAX_WAIT, float(r.headers.get("Retry-After") or 0) or 2.0 * (attempt + 1))
     except (TypeError, ValueError):
         return min(RATE_LIMIT_MAX_WAIT, 2.0 * (attempt + 1))
+
+
+def retry_after_seconds(r, default: float = 5.0) -> float:
+    """The Retry-After header in seconds, exactly as sent (seconds or an HTTP date),
+    never shortened. `default` only when the header is missing or unreadable."""
+    v = (r.headers.get("Retry-After") or "").strip() if getattr(r, "headers", None) else ""
+    if not v:
+        return default
+    try:
+        return max(0.0, float(v))
+    except ValueError:
+        pass
+    try:
+        from email.utils import parsedate_to_datetime
+        import datetime as _dt
+        when = parsedate_to_datetime(v)
+        return max(0.0, (when - _dt.datetime.now(_dt.timezone.utc)).total_seconds())
+    except (TypeError, ValueError):
+        return default
+
+
+class AllowanceUsed(RuntimeError):
+    """FreqBlog's monthly allowance for this key is used up (a 429 that isn't the
+    concurrency limit). `usage` is the /me/stats answer when it was already asked."""
+
+    def __init__(self, usage=None, detail: str = ""):
+        super().__init__("FreqBlog allowance used." + (f" {detail}" if detail else ""))
+        self.usage = usage
 
 
 class ProviderError(RuntimeError):
@@ -390,6 +421,36 @@ class Spotify:
                 progress(added, len(uris))
         return added
 
+    def track_meta(self, uris: list) -> dict:
+        """uri -> (title, artist) as Spotify has them now, 50 ids a request.
+
+        Matched by position in the reply, not by the uri in it: a relinked track comes
+        back under another id, and must still update the track that was asked about.
+        A track Spotify no longer knows (null in the reply) or a request that fails is
+        simply missing from the result. Best effort, never raises."""
+        out = {}
+        wanted = [u for u in uris if (u or "").startswith("spotify:track:")]
+        for start in range(0, len(wanted), 50):
+            chunk = wanted[start:start + 50]
+            try:
+                r = self._s.get(
+                    f"{SPOTIFY_API}/tracks",
+                    headers={"Authorization": f"Bearer {self._auth()}"},
+                    params={"ids": ",".join(u.split(":")[-1] for u in chunk), "market": "from_token"},
+                    timeout=20,
+                )
+                if r.status_code != 200:
+                    continue
+                rows = r.json().get("tracks") or []
+                for uri, t in zip(chunk, rows):
+                    if not isinstance(t, dict) or not t.get("name"):
+                        continue
+                    artists = ", ".join(n for n in ((a or {}).get("name") for a in (t.get("artists") or [])) if n)
+                    out[uri] = (t.get("name") or "", artists)
+            except Exception:
+                continue
+        return out
+
     def track_names(self, uris: list) -> dict:
         """uri -> "Artist - Title" for tracks this app has no local copy of.
 
@@ -397,28 +458,7 @@ class Spotify:
         than showing the user a base-62 id. Best effort: on any failure the
         caller falls back to the id.
         """
-        out = {}
-        ids = [u.split(":")[-1] for u in uris if u.startswith("spotify:track:")]
-        for start in range(0, len(ids), 50):
-            chunk = ids[start:start + 50]
-            try:
-                r = self._s.get(
-                    f"{SPOTIFY_API}/tracks",
-                    headers={"Authorization": f"Bearer {self._auth()}"},
-                    params={"ids": ",".join(chunk), "market": "US"},
-                    timeout=20,
-                )
-                if r.status_code != 200:
-                    continue
-                for t in (r.json().get("tracks") or []):
-                    if not isinstance(t, dict):
-                        continue
-                    artists = ", ".join(n for n in ((a or {}).get("name") for a in (t.get("artists") or [])) if n)
-                    name = t.get("name", "")
-                    out[t.get("uri", "")] = f"{artists} - {name}" if artists else name
-            except Exception:
-                continue
-        return out
+        return {u: (f"{a} - {t}" if a else t) for u, (t, a) in self.track_meta(uris).items()}
 
     def remove_items(self, pid: str, uris: list, progress=None) -> int:
         """Remove tracks from a playlist. Returns how many were removed.
@@ -612,33 +652,70 @@ class FreqBlog:
     too, so nothing here polls: the caller records queued tracks and asks again later
     (see Store.mark_waiting). GET /me/stats is free and checks the key."""
 
+    # One FreqBlog request in flight per program, whatever thread asks: a free key
+    # allows 2 /bulk requests at once and answers a third with 429.
+    _inflight = threading.Lock()
+
+    # words in a 429's body that mean the month's allowance, not the concurrency limit
+    ALLOWANCE_WORDS = ("quota", "allowance", "monthly", "per month", "this month")
+
     def __init__(self, api_key: str):
         self.api_key = api_key
         self._s = requests.Session()
         self._s.headers["User-Agent"] = UA
         self._sleep = time.sleep          # swapped out by tests
+        self.last_hint = ""               # /bulk's plain-English "hint", when it sent one
 
     def _headers(self) -> dict:
         if not self.api_key:
             raise ProviderError("No FreqBlog API key, add it in setup (Settings > Run setup again).")
         return {"x-api-key": self.api_key}
 
+    def _allowance_429(self, r, wait: float):
+        """Is this 429 the monthly allowance? The body says so; or the body doesn't say
+        either way, the Retry-After is long (the concurrency limit asks for seconds) and
+        /me/stats, asked once, shows the month used up. Returns the Usage when stats
+        were asked, True when the body alone said so, else None."""
+        body = ""
+        try:
+            j = r.json()
+            if isinstance(j, dict):
+                body = " ".join(str(j.get(k) or "") for k in ("detail", "error_code", "error", "message"))
+        except ValueError:
+            body = getattr(r, "text", "") or ""
+        b = body.lower()
+        if any(w in b for w in self.ALLOWANCE_WORDS):
+            return True
+        if "concurren" in b or "in flight" in b or "at once" in b or wait <= 60:
+            return None
+        try:
+            u = self.stats()
+        except Exception:
+            return None
+        return u if (u.quota and u.used >= u.quota) or u.pct >= 100 else None
+
     def _send(self, method: str, url: str, **kw):
-        """One request with FreqBlog's error shapes sorted out: a rejected or
-        suspended key raises KeyRejected, a 429 is waited out and retried quietly
-        (a few times, honouring Retry-After), anything else comes back as is."""
-        for attempt in range(RATE_LIMIT_TRIES):
-            try:
-                r = self._s.request(method, url, headers=self._headers(), **kw)
-            except requests.RequestException as e:
-                raise ProviderError(f"FreqBlog unreachable: {type(e).__name__}") from e
+        """One request with FreqBlog's error shapes sorted out: a rejected or suspended
+        key raises KeyRejected; the monthly allowance raises AllowanceUsed; a concurrency
+        429 is waited out for its full Retry-After, every time, then retried. Requests go
+        out strictly one at a time."""
+        for attempt in range(FREQBLOG_429_TRIES):
+            with FreqBlog._inflight:
+                try:
+                    r = self._s.request(method, url, headers=self._headers(), **kw)
+                except requests.RequestException as e:
+                    raise ProviderError(f"FreqBlog unreachable: {type(e).__name__}") from e
             if r.status_code in (401, 403):
                 raise KeyRejected("FreqBlog", "It may be mistyped, revoked or suspended.")
             if r.status_code == 429:
-                if attempt + 1 < RATE_LIMIT_TRIES:
-                    self._sleep(retry_after(r, attempt))
-                    continue
-                raise ProviderError("FreqBlog is busy (rate limit), try again in a moment.")
+                wait = retry_after_seconds(r)
+                used = self._allowance_429(r, wait)
+                if used is not None:
+                    raise AllowanceUsed(used if used is not True else None)
+                if wait > FREQBLOG_MAX_WAIT or attempt + 1 >= FREQBLOG_429_TRIES:
+                    raise ProviderError("FreqBlog is busy (rate limit), try again in a moment.")
+                self._sleep(wait)          # the full Retry-After, never less
+                continue
             return r
         raise ProviderError("FreqBlog is busy (rate limit), try again in a moment.")
 
@@ -653,15 +730,17 @@ class FreqBlog:
         )
 
     def lookup(self, title: str, artist: str = "", isrc: str = "", wait: int = 0) -> Features:
-        """One track. ISRC is preferred, it cannot mismatch. Falls back to
-        name+artist, which is fuzzy and can return the wrong recording."""
+        """One track. The name and artist always go with it when there are any: FreqBlog
+        charges a queued track once and collects it free when it is sent again BY NAME,
+        while an ISRC-only request is charged again. The ISRC rides along when known, as
+        the exact key."""
         params: dict = {"wait": wait}
+        if title:
+            params["track"] = title
+        if artist:
+            params["artist"] = artist
         if isrc:
             params["isrc"] = isrc
-        else:
-            params["track"] = title
-            if artist:
-                params["artist"] = artist
         r = self._send("GET", f"{FREQBLOG_API}/lookup", params=params, timeout=40)
 
         if r.status_code == 200:
@@ -717,17 +796,15 @@ class FreqBlog:
         # The REST endpoint takes a bare array, unlike the MCP tool, which
         # wraps the same items in {"tracks": [...]}.
         payload = list(items)[:50]
+        self.last_hint = ""
         r = self._send("POST", f"{FREQBLOG_API}/bulk", json=payload, timeout=90)
         if r.status_code not in (200, 202):
             raise ProviderError(f"FreqBlog bulk returned {r.status_code}.")
         j = read_json(r, "FreqBlog", want=(dict, list))
+        if isinstance(j, dict) and isinstance(j.get("hint"), str):
+            self.last_hint = j["hint"].strip()
         rows = j if isinstance(j, list) else j.get("results")
         return rows if isinstance(rows, list) else []
-
-    def lookup_isrc(self, isrc: str, wait: int = 0) -> Features:
-        """ISRC-only. Used as a second pass when a name match missed, ISRC is
-        an exact key and cannot return the wrong recording."""
-        return self.lookup("", "", isrc=isrc, wait=wait)
 
     @staticmethod
     def features_from_row(row: dict) -> Features:
@@ -737,7 +814,7 @@ class FreqBlog:
             return FreqBlog._parse(row["result"])
         days = _retry_days(row, row.get("result"))
         status = (row.get("backfill_status") or "").lower()
-        if status in ("queued", "running", "pending"):
+        if status in ("queued", "running", "pending", "processing"):
             return Features(pending=True, retry_after_days=days)
         return Features(terminal=True, retry_after_days=days)
 

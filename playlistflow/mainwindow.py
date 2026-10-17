@@ -21,7 +21,8 @@ from PySide6.QtWidgets import (
 
 from .domain import (Track, seams, summary, valid_key, felt_bpm, folded, reported_from_felt,
                      seam_key, set_display)
-from .providers import Spotify, FreqBlog, GetSongBPM, ProviderError, Features, KeyRejected
+from .providers import (Spotify, FreqBlog, GetSongBPM, ProviderError, Features, KeyRejected,
+                        AllowanceUsed)
 from .auth import SpotifyAuth, AuthError
 from .keys import clean_title, primary_artist
 from .store import Store, StoreError
@@ -58,10 +59,16 @@ class FetchWorker(QThread):
     """BPM/key lookups for a list of tracks, off the UI thread.
 
     FreqBlog counts every lookup against the key's monthly allowance, a 202 "queued"
-    answer too and on /bulk too. So: /bulk, 50 tracks a call; only tracks that aren't
-    cached or waiting reach here (fetch_features filters them); and nothing is re-polled.
-    A queued track is reported through `waiting` and asked about again later on the
-    Store's schedule, never in a loop inside this fetch.
+    answer too and on /bulk too. So: /bulk, 50 tracks a call, one call at a time;
+    only tracks that aren't cached or waiting reach here (fetch_features filters
+    them); and nothing is re-polled. A queued track is reported through `waiting` and
+    asked about again later on the Store's schedule, never in a loop inside this fetch.
+    Every request carries the track name and artist: a queued track sent again by
+    name is collected free, while an ISRC-only request is charged again.
+
+    When the month's allowance runs out (AllowanceUsed), FreqBlog gets nothing more
+    in this fetch; /me/stats is asked once for the reset date (`allowanceUsed`).
+    Tracks FreqBlog never answered are not recorded as missing: they stay due.
 
     Results are matched to tracks by the Track object, not by row, so nothing lands
     on the wrong row even if the list changed; the window also locks reordering while
@@ -70,6 +77,8 @@ class FetchWorker(QThread):
     resolved = Signal(object, object)   # Track, Features
     waiting = Signal(object, str, object)   # Track, "queued" | "missing", retry_after_days
     message = Signal(str)
+    hint = Signal(str)               # /bulk's own "hint" text, shown as-is while fetching
+    allowanceUsed = Signal(object)   # Usage from /me/stats, or None if that failed too
     done = Signal()
     keyRejected = Signal(str)        # provider name: its key was refused
 
@@ -82,11 +91,15 @@ class FetchWorker(QThread):
         self._stop = False
         self._got = 0
         self.fb_rejected = False      # once FreqBlog refuses the key, stop asking it
+        self.fb_out = False           # the month's allowance is used up: stop asking it
         self.requests = 0             # FreqBlog track lookups sent (what the allowance counts)
         self.calls = 0                # FreqBlog HTTP calls made
 
     def stop(self):
         self._stop = True
+
+    def _fb_stopped(self) -> bool:
+        return self._stop or self.fb_rejected or self.fb_out
 
     # -- helpers ---------------------------------------------------------
 
@@ -95,13 +108,25 @@ class FetchWorker(QThread):
         self._got += 1
         self.resolved.emit(trk, feat)
 
+    def _allowance(self, e: AllowanceUsed):
+        self.fb_out = True
+        usage = e.usage
+        if usage is None:
+            try:
+                usage = self.fb.stats()          # once: free, and it has the reset date
+            except Exception:
+                usage = None
+        self.allowanceUsed.emit(usage)
+
     def _bulk_pass(self, jobs, build, source):
-        """Run tracks through /bulk, 50 a call. Returns (queued, missed), each a list of
-        (Track, Features)."""
-        queued, missed = [], []
+        """Run tracks through /bulk, 50 a call. Returns (queued, missed, unsent): the
+        first two lists of (Track, Features) FreqBlog answered, the last the tracks
+        it never answered (stopped, rejected, out of allowance or unreachable)."""
+        queued, missed, unsent = [], [], []
         for start in range(0, len(jobs), 50):
-            if self._stop or self.fb_rejected:
-                return queued, missed + [(t, Features(terminal=True)) for t in jobs[start:]]
+            if self._fb_stopped():
+                unsent.extend(jobs[start:])
+                break
             chunk = jobs[start:start + 50]
             try:
                 self.calls += 1
@@ -110,12 +135,19 @@ class FetchWorker(QThread):
             except KeyRejected:
                 self.fb_rejected = True
                 self.keyRejected.emit("FreqBlog")
-                missed.extend((t, Features(terminal=True)) for t in chunk)
+                unsent.extend(chunk)
+                continue
+            except AllowanceUsed as e:
+                self.requests -= len(chunk)      # refused, not charged
+                self._allowance(e)
+                unsent.extend(chunk)
                 continue
             except ProviderError as e:
                 self.message.emit(str(e))
-                missed.extend((t, Features(terminal=True)) for t in chunk)
+                unsent.extend(chunk)
                 continue
+            if getattr(self.fb, "last_hint", ""):
+                self.hint.emit(self.fb.last_hint)
             rows = list(rows) + [{}] * (len(chunk) - len(rows))
             for trk, row in zip(chunk, rows):
                 feat = FreqBlog.features_from_row(row)
@@ -125,7 +157,7 @@ class FetchWorker(QThread):
                     missed.append((trk, feat))
                 else:
                     self._emit(trk, feat, source)
-        return queued, missed
+        return queued, missed, unsent
 
     # -- main ------------------------------------------------------------
 
@@ -140,47 +172,14 @@ class FetchWorker(QThread):
                 item["isrc"] = t.isrc
             return item
 
-        # Pass 1, ISRC + name together, through /bulk.
+        # Pass 1, name + artist + ISRC together, through /bulk. (There is no ISRC-only
+        # pass any more: FreqBlog charges an ISRC-only request again, and the ISRC
+        # already went out with the name here.)
         self.message.emit(f"Looking up {total} track(s)…")
-        queued, missed = self._bulk_pass(self.jobs, full, "freqblog")
+        queued, missed, unsent = self._bulk_pass(self.jobs, full, "freqblog")
 
-        # No re-poll here: queued tracks are being analysed and get asked about again
-        # later (Store.mark_waiting), which is what keeps a free key inside its allowance.
-
-        # Pass 2, ISRC alone, for tracks FreqBlog said it doesn't have. An exact key;
-        # catches names that matched wrongly.
-        if missed and not self._stop and not self.fb_rejected:
-            have_isrc = [(t, f) for t, f in missed if t.isrc]
-            if have_isrc:
-                self.message.emit(f"Retrying {len(have_isrc)} by ISRC…")
-                still = []
-                for n, (trk, f) in enumerate(have_isrc):
-                    if self._stop:
-                        still.extend(have_isrc[n:])
-                        break
-                    try:
-                        self.calls += 1
-                        self.requests += 1
-                        feat = self.fb.lookup_isrc(trk.isrc)
-                    except KeyRejected:
-                        self.fb_rejected = True
-                        self.keyRejected.emit("FreqBlog")
-                        still.extend(have_isrc[n:])
-                        break
-                    except ProviderError as e:
-                        self.message.emit(str(e))
-                        still.append((trk, f))
-                        continue
-                    if feat.bpm or feat.camelot:
-                        self._emit(trk, feat, "freqblog")
-                    elif feat.pending:
-                        queued.append((trk, feat))
-                    else:
-                        still.append((trk, feat))
-                missed = still + [(t, f) for t, f in missed if not t.isrc]
-
-        # Pass 3, cleaned title / first artist only, through /bulk.
-        if missed and not self._stop and not self.fb_rejected:
+        # Pass 2, cleaned title / first artist only, through /bulk.
+        if missed and not self._fb_stopped():
             retry = [t for t, _ in missed
                      if clean_title(t.title) or
                      (primary_artist(t.artist) and primary_artist(t.artist) != t.artist)]
@@ -191,18 +190,19 @@ class FetchWorker(QThread):
                     return {"track": clean_title(t.title) or t.title,
                             "artist": primary_artist(t.artist) or t.artist}
 
-                q2, m2 = self._bulk_pass(retry, cleaned, "freqblog")
-                settled = {id(t) for t in retry} - {id(t) for t, _ in m2}
+                q2, m2, _u2 = self._bulk_pass(retry, cleaned, "freqblog")
+                settled = {id(t) for t in retry} - {id(t) for t, _ in m2} - {id(t) for t in _u2}
                 missed = [(t, f) for t, f in missed if id(t) not in settled]
                 queued += q2
 
-        # Pass 4, GetSongBPM. Thin coverage here, but free and already keyed. It also
-        # gets a try at queued tracks: an answer there saves FreqBlog a re-check.
-        if (missed or queued) and not self._stop and self.gs.api_key:
-            pool = missed + queued
+        # Pass 3, GetSongBPM. Thin coverage here, but free and already keyed. It also
+        # gets a try at queued and unanswered tracks: an answer there saves a FreqBlog
+        # request later.
+        if (missed or queued or unsent) and not self._stop and self.gs.api_key:
+            pool = [t for t, _ in missed + queued] + list(unsent)
             self.message.emit(f"Trying GetSongBPM for the last {len(pool)}…")
             found = set()
-            for n, (trk, _) in enumerate(pool):
+            for trk in pool:
                 if self._stop:
                     break
                 try:
@@ -217,8 +217,10 @@ class FetchWorker(QThread):
                     found.add(id(trk))
             missed = [(t, f) for t, f in missed if id(t) not in found]
             queued = [(t, f) for t, f in queued if id(t) not in found]
+            unsent = [t for t in unsent if id(t) not in found]
 
-        # when to ask again: recorded by the window (Store.mark_waiting)
+        # when to ask again: recorded by the window (Store.mark_waiting), only for what
+        # FreqBlog actually answered
         if not self.fb_rejected:
             for trk, f in queued:
                 self.waiting.emit(trk, "queued", f.retry_after_days)
@@ -227,13 +229,31 @@ class FetchWorker(QThread):
 
         tail = []
         if queued:
-            tail.append(f"{len(queued)} being analysed by FreqBlog, checked again in a few "
-                        "minutes")
+            tail.append(f"{len(queued)} being analysed by FreqBlog, checked again shortly")
         if missed:
             tail.append(f"{len(missed)} not found anywhere, type those in")
+        if unsent:
+            tail.append(f"{len(unsent)} not looked up yet")
         self.message.emit(f"Fetched {self._got} of {total}." +
                           (" " + "; ".join(tail) + "." if tail else ""))
         self.done.emit()
+
+
+class RefreshWorker(QThread):
+    """Current titles and artists from Spotify for a saved playlist being opened,
+    off the UI thread (Spotify.track_meta, 50 tracks a request)."""
+    done = Signal(str, object, object)      # playlist name, {uri: (title, artist)}, uris asked
+
+    def __init__(self, spotify, name: str, uris: list, parent=None):
+        super().__init__(parent)
+        self.spotify, self.name, self.uris = spotify, name, list(uris)
+
+    def run(self):
+        try:
+            meta = self.spotify.track_meta(self.uris)
+        except Exception:                      # offline or anything: nothing changes
+            meta = {}
+        self.done.emit(self.name, meta, self.uris)
 
 
 # --------------------------------------------------------------------------
@@ -599,6 +619,7 @@ class MainWindow(QMainWindow):
         # seam_key() ids the user has listened to and approved
         self.approved: set = set()
         self.worker: FetchWorker | None = None
+        self.refresher: RefreshWorker | None = None
         self.wheel: KeyWheelDialog | None = None
         self._refreshing_spotify = False
         self._sort_field = ""
@@ -1044,6 +1065,13 @@ class MainWindow(QMainWindow):
         self.busy = QLabel("")
         self.busy.setObjectName("busy")
         sb.addWidget(self.busy)
+        # FreqBlog's own "hint" while a fetch runs (more than half a batch still being
+        # analysed), as FreqBlog wrote it; cleared when the fetch ends
+        self.fb_hint = QLabel("")
+        self.fb_hint.setObjectName("fb_hint")
+        self.fb_hint.setStyleSheet(f"color:{theme.MUTED};")
+        self.fb_hint.setVisible(False)
+        sb.addWidget(self.fb_hint)
         self.stat = QLabel("")
         self.stat.setObjectName("stat")
         self.stat.setContentsMargins(0, 0, 10, 0)
@@ -1496,6 +1524,44 @@ class MainWindow(QMainWindow):
         self.refresh()
         self.load_details()
         self.status(f"Loaded {name}, {len(self.tracks)} tracks.")
+        self.refresh_saved_metadata(name)
+
+    def refresh_saved_metadata(self, name: str) -> bool:
+        """Opened a saved playlist while signed in: bring its stored Spotify titles and
+        artists up to date in the background. Not signed in, nothing from Spotify in it,
+        or something already running: it opens as stored and nothing else happens."""
+        uris = [t.uri for t in self.tracks if (t.uri or "").startswith("spotify:track:")]
+        if not uris or not self.auth.authorised or self.fetching() or self.store is None:
+            return False
+        self.refresher = RefreshWorker(self.spotify, name, uris, self)
+        self.refresher.done.connect(self._saved_metadata_done)
+        self.refresher.start()
+        return True
+
+    def _saved_metadata_done(self, name: str, meta: dict, uris: list):
+        if self.refresher is not None:
+            self.refresher.wait()
+        if not meta:
+            return                             # offline or refused: kept as stored, silently
+        changed_here = 0
+        if self.current_name == name:
+            for t in self.tracks:
+                got = meta.get(t.uri or "")
+                if got and got[0] and (t.title, t.artist) != got:
+                    t.title, t.artist = got
+                    changed_here += 1
+        changed = self.store.refresh_metadata(name, meta) if self.store else 0
+        missing = len(set(uris) - set(meta))
+        if changed_here:
+            self.refresh(keep_undo=True)
+        bits = []
+        if changed or changed_here:
+            bits.append(f"Updated {changed_here or changed} track name(s) in '{name}' "
+                        "from Spotify")
+        if missing:
+            bits.append(f"{missing} track(s) Spotify no longer has are kept as stored")
+        if bits:
+            self.status(". ".join(bits) + ".")
 
     def rename_saved(self):
         name = self._selected_saved()
@@ -1575,7 +1641,10 @@ class MainWindow(QMainWindow):
             self.undo_stack.pop(0)
 
     def fetching(self) -> bool:
-        return bool(self.worker and self.worker.isRunning())
+        """A BPM/key fetch or a saved playlist's Spotify refresh is running: the list
+        mustn't be reordered, cut or undone under it."""
+        return bool((self.worker and self.worker.isRunning()) or
+                    (getattr(self, "refresher", None) and self.refresher.isRunning()))
 
     def _locked(self, what: str) -> bool:
         """True (and said in the status bar) while a BPM/key fetch runs: reordering,
@@ -2002,10 +2071,37 @@ class MainWindow(QMainWindow):
         self.worker.keyRejected.connect(self._key_rejected)
         self.worker.resolved.connect(self._apply_feature)
         self.worker.waiting.connect(self._mark_waiting)
+        self.worker.hint.connect(self._show_hint)
+        self.worker.allowanceUsed.connect(self._allowance_used)
         self.worker.message.connect(self.status)
         self.worker.done.connect(self._fetch_done)
         self.busy_on(f"Looking up {len(jobs)} track(s)…")
         self.worker.start()
+
+    def _show_hint(self, text: str):
+        if text:
+            self.statusBar().clearMessage()
+        self.fb_hint.setText(text)
+        self.fb_hint.setToolTip(text)
+        self.fb_hint.setVisible(bool(text))
+
+    def _allowance_used(self, usage):
+        """FreqBlog's allowance ran out mid-fetch: say so once per session, with the
+        reset date from /me/stats (the same call Settings' usage line uses)."""
+        from .freqcheck import reset_text
+        when = reset_text(getattr(usage, "reset", "") or "")
+        msg = ("FreqBlog allowance used" + (f", resets on {when}." if when else ".") +
+               " No more BPM/key lookups go to FreqBlog until then.")
+        self.status(msg)
+        if "FreqBlog allowance" in self._warned:
+            return
+        self._warned.add("FreqBlog allowance")
+        box = QMessageBox(QMessageBox.Information, "FreqBlog allowance used", msg,
+                          QMessageBox.Ok, self)
+        box.setObjectName("allowance_used")
+        box.setInformativeText("Settings shows your usage. GetSongBPM, if you added a key, "
+                               "and typing values in still work.")
+        box.exec()
 
     def _mark_waiting(self, trk: Track, kind: str, days):
         if self.store is not None:
@@ -2066,6 +2162,7 @@ class MainWindow(QMainWindow):
         self._live.start()
 
     def _fetch_done(self):
+        self._show_hint("")
         self.busy_off()
         self.refresh(keep_undo=True)
         self._autosave.start()
@@ -2632,11 +2729,13 @@ class MainWindow(QMainWindow):
             self._autosave.start()
 
     def status(self, msg: str):
-        self.statusBar().showMessage(msg, 12000)
         if self.spinner.running:
-            # While something is running, mirror progress next to the spinner
-            # the status bar is easy to miss at the bottom of the window.
+            # While something is running, progress goes next to the spinner (and the
+            # FreqBlog hint beside it); a temporary message would be painted over both.
+            self.statusBar().clearMessage()
             self.busy.setText(msg)
+            return
+        self.statusBar().showMessage(msg, 12000)
 
     def busy_on(self, msg: str = ""):
         self.busy.setText(msg)
@@ -2644,8 +2743,11 @@ class MainWindow(QMainWindow):
         QApplication.processEvents()
 
     def busy_off(self):
+        last = self.busy.text()
         self.spinner.stop()
         self.busy.setText("")
+        if last:                              # the last progress line stays readable a while
+            self.statusBar().showMessage(last, 12000)
 
     def _restore_layout(self):
         g = self.prefs.geometry
@@ -2683,6 +2785,8 @@ class MainWindow(QMainWindow):
         if self.worker and self.worker.isRunning():
             self.worker.stop()
             self.worker.wait(3000)
+        if self.refresher is not None and self.refresher.isRunning():
+            self.refresher.wait(3000)
         # update threads are children of this window: let them finish before it goes,
         # or Qt aborts on a QThread destroyed while running
         if self._upd_dl is not None and self._upd_dl.isRunning():

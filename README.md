@@ -86,10 +86,12 @@ There is no client secret to copy. The program signs in with PKCE.
 
 The free tier has a monthly allowance of requests (setup and Settings show how
 much of it is used). Playlist Flow sends playlists through FreqBlog's bulk
-lookup, 50 tracks a call. A value that resolves is cached, so a track that has
-been looked up costs nothing the next time you load the playlist. A track FreqBlog
-is still analysing is checked again a few minutes later, not polled, and one it
-doesn't know is asked about again after a week.
+lookup, 50 tracks a call, one call at a time, always with the track name and
+artist. A value that resolves is cached, so a track that has been looked up costs
+nothing the next time you load the playlist. A track FreqBlog is still analysing is
+checked again about 45 seconds later (by name, which FreqBlog doesn't charge again),
+not polled, and one it doesn't know is asked about again after a week. If the month's
+allowance runs out, the program stops asking FreqBlog until it resets and says when.
 
 ### 3. GetSongBPM (optional)
 
@@ -317,11 +319,10 @@ Spotify removed its `audio_features` endpoint in November 2024 and never
 replaced it, so the numbers come from elsewhere, in this order:
 
 1. **FreqBlog**, by name, artist and ISRC. It analyses tracks it has never
-   seen on demand, so a miss can resolve a few minutes later; the program
-   re-polls those for a while before giving up
-2. **ISRC retry**, an exact recording identifier that cannot mismatch
-3. **Cleaned titles**, which strips `(feat. …)`, `- Remastered` and similar
-4. **GetSongBPM**, if you set a key. Exact title and artist matches only
+   seen on demand, so a miss can resolve shortly after; the program checks those
+   again about 45 seconds later instead of polling
+2. **Cleaned titles**, which strips `(feat. …)`, `- Remastered` and similar
+3. **GetSongBPM**, if you set a key. Exact title and artist matches only
 
 Whatever is still missing is listed as "not found anywhere, type those in".
 Type those in once; typed values are cached and never overwritten.

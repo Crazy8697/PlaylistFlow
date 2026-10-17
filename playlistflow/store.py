@@ -24,9 +24,11 @@ CACHE_FILE = "cache.json"
 # Inside cache.json: when a track FreqBlog queued (202) or could not find may be asked
 # about again. Keyed like the cache; never sent anywhere.
 WAIT_KEY = "_lookup_wait"
-# Re-check delays for a queued track, by how many checks it has had. FreqBlog says
-# analysis is usually ready within a minute or so, and every check is a request.
-QUEUED_DELAYS = (120, 600, 3600, 6 * 3600, 86400)
+# Re-check delays for a queued track, by how many checks it has had. Every check is a
+# request (a queued track sent again by name within 30 days is collected free).
+# FreqBlog: analysis is usually ready within a minute, so the first re-check comes
+# after 45 seconds; later ones keep the longer waits.
+QUEUED_DELAYS = (45, 600, 3600, 6 * 3600, 86400)
 MISSING_DAYS = 7          # a track found nowhere is asked about again after this
 
 
@@ -159,6 +161,49 @@ class Store:
             "description": data.get("description", "") or "",
             "ear_checked": data.get("ear_checked", []) or [],
         }
+
+    def refresh_metadata(self, name: str, meta: dict) -> int:
+        """Bring the stored titles and artists of a saved playlist up to date with
+        Spotify (Developer Terms IV.3.1: stored Spotify content kept current).
+
+        `meta` is uri -> (title, artist). Both the save and the auto-save are updated
+        in place; only those two fields of matching tracks change, never the order,
+        BPM/key, ear-checks or anything else, and a track missing from `meta` is left
+        exactly as stored. Each file keeps its modified time, so which of the two is
+        newer (and so which one opens) doesn't change. Returns how many track entries
+        changed across both files."""
+        import os
+        changed = 0
+        for path in self._paths(name):
+            if not path.exists():
+                continue
+            try:
+                st = path.stat()
+                data = json.loads(path.read_text(encoding="utf-8"))
+                tracks = data.get("tracks") if isinstance(data, dict) else None
+                if not isinstance(tracks, list):
+                    continue
+                n = 0
+                for d in tracks:
+                    if not isinstance(d, dict):
+                        continue
+                    got = meta.get(d.get("uri") or "")
+                    if not got:
+                        continue
+                    title, artist = got
+                    if title and (d.get("title") != title or d.get("artist") != artist):
+                        d["title"], d["artist"] = title, artist
+                        n += 1
+                if not n:
+                    continue
+                tmp = path.with_suffix(".tmp")
+                tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+                tmp.replace(path)
+                os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+                changed += n
+            except (OSError, ValueError, TypeError):
+                continue                 # best effort: the playlist stays as stored
+        return changed
 
     def has_newer_auto(self, name: str) -> bool:
         manual_p, auto_p = self._paths(name)

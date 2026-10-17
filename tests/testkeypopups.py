@@ -102,7 +102,8 @@ try:
 except KeyRejected:
     ok("429 that never clears is a plain error, not a key problem", False)
 except ProviderError:
-    ok("429 that never clears is a plain error, not a key problem", len(slept) == pv.RATE_LIMIT_TRIES - 1)
+    ok("429 that never clears is a plain error, not a key problem",
+       len(slept) == pv.FREQBLOG_429_TRIES - 1 and all(x == 5.0 for x in slept), str(slept))
 fb._s = Seq(Resp(404, {"terminal": True}))
 f = fb.lookup("Unknown Song", "Nobody")
 ok("track not found is a quiet miss", f.terminal and not f.bpm)
