@@ -986,6 +986,8 @@ class MainWindow(QMainWindow):
         self.player.nextClicked.connect(lambda: self._player_do("next"))
         self.player.seekRequested.connect(lambda ms: self._player_do("seek", ms))
         self.player.previewClicked.connect(self.preview_transition)
+        self.player.shuffleClicked.connect(self.toggle_shuffle)
+        self._shuffle_pending = None       # the state a click asked for, until a poll confirms
         strip.addWidget(self.player, 1)
 
         strip_w = QWidget()
@@ -2704,6 +2706,54 @@ class MainWindow(QMainWindow):
             art_url=art,
             uri=uri,
         )
+        self._show_shuffle(st)
+
+    @staticmethod
+    def shuffle_from(st: dict) -> tuple:
+        """(shuffle_state, smart_shuffle, toggling disallowed) from a playback state.
+        smart_shuffle isn't in Spotify's documented fields; it is used when present."""
+        dis = ((st.get("actions") or {}).get("disallows") or {}).get("toggling_shuffle")
+        return bool(st.get("shuffle_state")), bool(st.get("smart_shuffle")), bool(dis)
+
+    def _show_shuffle(self, st: dict):
+        state, smart, dis = self.shuffle_from(st)
+        pending, self._shuffle_pending = self._shuffle_pending, None
+        if pending is not None and pending[0] != state and not smart:
+            if pending[1] == 0:
+                # Spotify doesn't promise its player calls apply in order: one more look
+                # before saying the click didn't take
+                self._shuffle_pending = (pending[0], 1)
+                QTimer.singleShot(1500, self.poll_player)
+                return
+            self.status(f"Spotify kept shuffle {'on' if state else 'off'}.")
+        self.player.set_shuffle(state, smart=smart, available=True, disallowed=dis)
+
+    def toggle_shuffle(self, want: bool):
+        """The shuffle button, and the only place the program changes shuffle: one
+        PUT /me/player/shuffle for the state asked for, shown at once, confirmed by the
+        next poll. Smart shuffle can't be turned off through the Web API."""
+        p = self.player
+        if p.shuffle_smart:
+            p.set_shuffle(None, available=True)
+            self.status("Smart shuffle is on. Turn it off in Spotify.")
+            log.debug("shuffle: click want=%s result=not-sent(smart shuffle)", "on" if want else "off")
+            return
+        if not self.auth.authorised or not (self._last_player_state or {}).get("item"):
+            p.set_shuffle(None, available=False)
+            self.status("Start playback in Spotify first, then shuffle can be changed here.")
+            log.debug("shuffle: click want=%s result=not-sent(no playback)", "on" if want else "off")
+            return
+        try:
+            self.spotify.set_shuffle(want)
+        except (ProviderError, AuthError) as e:
+            p.set_shuffle(None, available=True)          # back to what Spotify last said
+            self.status(f"Shuffle wasn't changed: {e}")
+            log.debug("shuffle: click want=%s result=refused", "on" if want else "off")
+            return
+        log.debug("shuffle: click want=%s result=sent", "on" if want else "off")
+        self._shuffle_pending = (want, 0)
+        p.set_shuffle(want, available=True)
+        QTimer.singleShot(700, self.poll_player)
 
     def toggle_ear_check(self, row: int):
         """Flip the listened-and-approved mark on the seam row -> row+1.

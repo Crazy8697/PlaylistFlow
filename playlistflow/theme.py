@@ -66,6 +66,13 @@ QPushButton#menubtn:hover {{ background: {TEAL}; color: #ffffff; border-radius: 
 /* transport: quiet until hovered */
 QPushButton#transport {{ background: {SURFACE}; border: 1px solid {BORDER_HI}; color: {TEXT}; }}
 QPushButton#transport:hover {{ background: {TEAL}; border-color: {ACCENT}; }}
+/* shuffle: muted when off, lit like an active toolbar button when on (the glow is a
+   drop shadow set in player.py) */
+QPushButton#shuffle {{ background: {SURFACE}; border: 1px solid {BORDER}; }}
+QPushButton#shuffle:hover {{ background: {TEAL}; border-color: {ACCENT}; }}
+QPushButton#shuffle:checked {{ background: {ACCENT}; border-color: {ACCENT}; }}
+QPushButton#shuffle:disabled {{ background: {SURFACE}; border-color: {BORDER}; }}
+QPushButton#shuffle:checked:disabled {{ background: {TEAL_LO}; border-color: {ACCENT}; }}
 
 /* toolbars: grouped, with a small-caps label and a dotted grip, icons over labels */
 QToolBar {{ background: {PANEL}; border: none; border-bottom: 1px solid {BORDER}; spacing: 2px; padding: 3px 4px; }}
@@ -219,10 +226,10 @@ def _iconic():
     return _ICONIC
 
 
-def icon(name: str, active_ink: bool = True):
+def icon(name: str, active_ink: bool = True, color: str = ""):
     """A Material Design icon (mdi6) in the theme's colours. Checkable buttons get a
     dark glyph when on, to sit on the cyan fill."""
-    kw = {"color": TEXT, "color_disabled": DIM}
+    kw = {"color": color or TEXT, "color_disabled": DIM}
     if active_ink:
         kw["color_on"] = ACCENT_INK
     return _iconic().icon("mdi6." + name, **kw)

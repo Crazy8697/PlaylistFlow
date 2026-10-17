@@ -301,6 +301,20 @@ mw.DocDialog("TERMS.md", w).exec()
 _name["next"] = "43-disconnect-spotify"
 mw.DisconnectDialog(w.prefs.storage_dir, w).exec()
 
+# ---- 1.0.2: the shuffle button, off, on, smart shuffle and disabled ----
+for nm, args in (("off", dict(state=False, available=True)),
+                 ("on", dict(state=True, available=True)),
+                 ("smart-shuffle", dict(state=False, smart=True, available=True)),
+                 ("disabled-nothing-playing", dict(state=True, available=False))):
+    w.player.shuffle_smart = False
+    w.player.set_shuffle(args.pop("state"), **args)
+    w.player.grab().save(str(OUT / f"90-player-shuffle-{nm}.png"))
+    SAVED.append(f"90-player-shuffle-{nm}.png")
+w.player.shuffle_smart = False
+w.player.set_shuffle(True, available=True)
+save(w, "91-main-shuffle-on", (1440, 900))
+w.player.set_shuffle(False, available=True)
+
 # ---- 1.0.1: the "Refused by Spotify" section, and a moved toolbar after a restart ----
 from playlistflow.providers import SpotifyPlaylist as _SP
 w._fill_spotify_list([_SP("S1", "Demo Set", 40, "me", True),

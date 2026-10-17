@@ -139,14 +139,14 @@ def close(w):
 
 print(f"version under test: {__version__}, fake GitHub at {BASE}")
 
-# 1. a proper 1.0.1 is offered
+# 1. a proper newer release is offered (99.x, so it stays newer as the program grows)
 print("1. newer release with the installer and checksum")
-release("v1.0.1")
+release("v99.0.1")
 w = new_window()
 quiet_check(w)
-ok("1.0.1 offered", w._update_last.get("status") == "newer" and w.update_bar.isVisibleTo(w),
+ok("99.0.1 offered", w._update_last.get("status") == "newer" and w.update_bar.isVisibleTo(w),
    w.update_label.text())
-ok("bar text", w.update_label.text() == "Playlist Flow 1.0.1 is available")
+ok("bar text", w.update_label.text() == "Playlist Flow 99.0.1 is available")
 
 # 2. the old zip-only shape is invisible
 print("2. a release shaped like the old v1.2.0 (zip only)")
@@ -184,18 +184,18 @@ for cur, tag in (("0.5.0", "v0.6.0"), ("0.6.0", "v0.6.0"), ("0.7.0", "v0.6.0")):
 
 # 4. skip persists across restarts, a newer one still shows; later lasts a session
 print("4. skip this version / later")
-release("v1.0.1")
+release("v99.0.1")
 quiet_check(w)
 w._skip_update()
 ok("skip hides the bar", not w.update_bar.isVisibleTo(w))
-ok("skip stored", Prefs().update_skip == "1.0.1")
+ok("skip stored", Prefs().update_skip == "99.0.1")
 close(w)
 w = new_window()                                                 # "restart"
 quiet_check(w)
-ok("skipped 1.0.1 stays quiet after restart", not w.update_bar.isVisibleTo(w))
-release("v1.0.2")
+ok("skipped 99.0.1 stays quiet after restart", not w.update_bar.isVisibleTo(w))
+release("v99.0.2")
 quiet_check(w)
-ok("1.0.2 still offered", w.update_bar.isVisibleTo(w), w.update_label.text())
+ok("99.0.2 still offered", w.update_bar.isVisibleTo(w), w.update_label.text())
 w._later_update()
 ok("later hides the bar", not w.update_bar.isVisibleTo(w))
 close(w)
@@ -223,7 +223,7 @@ close(w)
 
 # 6. a wrong checksum is refused and nothing is left behind
 print("6. bad SHA-256")
-release("v1.0.2")
+release("v99.0.3")          # always newer than the program under test
 info = updater.check_release()
 good = STATE["sha"]
 STATE["sha"] = "0" * 64

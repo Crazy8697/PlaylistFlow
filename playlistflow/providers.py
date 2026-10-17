@@ -400,6 +400,11 @@ class Spotify:
     def pause(self):
         self._player_call("PUT", "pause")
 
+    def set_shuffle(self, state: bool):
+        """PUT /me/player/shuffle?state=... on the active device. Only ever called when
+        the user clicks the shuffle button: nothing else in the program changes shuffle."""
+        self._player_call("PUT", "shuffle", params={"state": "true" if state else "false"})
+
     def next_track(self):
         self._player_call("POST", "next")
 

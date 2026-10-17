@@ -36,6 +36,7 @@ class PlayerBar(QWidget):
     nextClicked = Signal()
     previewClicked = Signal(int)      # tail seconds
     seekRequested = Signal(int)       # ms
+    shuffleClicked = Signal(bool)     # the state the user asked for
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -72,6 +73,22 @@ class PlayerBar(QWidget):
         self.open_link = spotify_link("Open what's playing in Spotify")
         self.open_link.setObjectName("player_open_spotify")
         top.addWidget(self.open_link)
+
+        # Shuffle as Spotify has it for this playback (read from the player poll);
+        # only a click here ever changes it.
+        from . import theme
+        from PySide6.QtCore import QSize
+        self.btn_shuffle = QPushButton()
+        self.btn_shuffle.setObjectName("shuffle")
+        self.btn_shuffle.setCheckable(True)
+        self.btn_shuffle.setFixedWidth(44)
+        self.btn_shuffle.setIcon(theme.icon("shuffle", color=theme.MUTED))
+        self.btn_shuffle.setIconSize(QSize(18, 18))
+        self.btn_shuffle.clicked.connect(self._shuffle_clicked)
+        self.shuffle_state = None          # last known: True, False or None (never seen)
+        self.shuffle_smart = False
+        top.addWidget(self.btn_shuffle)
+        self.set_shuffle(None, available=False)
 
         self.btn_prev = QPushButton("◀◀")
         self.btn_prev.setFixedWidth(44)
@@ -128,6 +145,43 @@ class PlayerBar(QWidget):
 
         outer.addLayout(bot)
 
+    def _shuffle_clicked(self, checked: bool):
+        self.shuffleClicked.emit(bool(checked))
+
+    def set_shuffle(self, state, smart: bool = False, available: bool = True,
+                    disallowed: bool = False):
+        """Show shuffle as Spotify reports it. state None: never seen yet (shown off).
+        Not available (nothing playing, no device): the last known state, disabled."""
+        from PySide6.QtGui import QColor
+        from PySide6.QtWidgets import QGraphicsDropShadowEffect
+        if state is not None:
+            self.shuffle_state = bool(state)
+            self.shuffle_smart = bool(smart)
+        on = bool(self.shuffle_state) or self.shuffle_smart
+        b = self.btn_shuffle
+        b.blockSignals(True)
+        b.setChecked(on)
+        b.blockSignals(False)
+        b.setEnabled(available and not disallowed)
+        if not available:
+            b.setToolTip(f"Shuffle: {'on' if on else 'off'}. Start playback in Spotify first "
+                         "to change it.")
+        elif self.shuffle_smart:
+            b.setToolTip("Smart shuffle is on. Turn it off in Spotify.")
+        elif disallowed:
+            b.setToolTip(f"Shuffle: {'on' if on else 'off'}. Spotify doesn't allow changing "
+                         "it for this playback.")
+        else:
+            b.setToolTip(f"Shuffle: {'on' if on else 'off'}")
+        if on and b.isEnabled():
+            glow = QGraphicsDropShadowEffect(b)
+            glow.setColor(QColor("#19C2E6"))
+            glow.setBlurRadius(16)
+            glow.setOffset(0, 0)
+            b.setGraphicsEffect(glow)
+        else:
+            b.setGraphicsEffect(None)
+
     def _released(self):
         self._dragging = False
         if self._duration > 0:
@@ -164,6 +218,7 @@ class PlayerBar(QWidget):
                 int(1000 * position_ms / duration_ms) if duration_ms else 0)
 
     def set_offline(self, msg: str = "Spotify not running"):
+        self.set_shuffle(None, available=False)
         self.set_art("")
         self._uri = ""
         set_link_target(self.open_link, "track", "")
