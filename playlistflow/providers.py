@@ -50,6 +50,19 @@ class ProviderError(RuntimeError):
     pass
 
 
+def read_json(r, who: str = "The server", want=dict):
+    """r.json(), but a reply that is not JSON (or not the expected shape) raises
+    ProviderError with a plain message instead of a parser traceback."""
+    try:
+        j = r.json()
+    except ValueError:
+        raise ProviderError(f"{who} sent a reply Playlist Flow could not read "
+                            f"(HTTP {r.status_code}). Try again in a moment.") from None
+    if want is not None and not isinstance(j, want):
+        raise ProviderError(f"{who} sent an unexpected reply (HTTP {r.status_code}).")
+    return j
+
+
 class RateLimited(ProviderError):
     """429. Carries Spotify's Retry-After so the caller can pace itself.
 
@@ -84,6 +97,19 @@ class SpotifyPlaylist:
     mine: bool
 
 
+class _SpotifySession(requests.Session):
+    """A connection failure (offline, DNS, timeout) becomes a ProviderError with a
+    plain message, which every caller already shows, instead of an unhandled
+    requests exception."""
+
+    def request(self, *a, **kw):
+        try:
+            return super().request(*a, **kw)
+        except requests.RequestException as e:
+            raise ProviderError(f"Couldn't reach Spotify ({type(e).__name__}). Check your "
+                                "connection and try again.") from None
+
+
 class Spotify:
     """Playlist reads with a user token.
 
@@ -99,7 +125,7 @@ class Spotify:
 
     def __init__(self, auth):
         self.auth = auth
-        self._s = requests.Session()
+        self._s = _SpotifySession()
         self._s.headers["User-Agent"] = UA
 
     def _auth(self) -> str:
@@ -131,13 +157,13 @@ class Spotify:
             raise ProviderError("Playlist not found.")
         if r.status_code != 200:
             raise ProviderError(f"Spotify returned {r.status_code} for that playlist.")
-        return r.json().get("name", "")
+        return read_json(r, "Spotify").get("name") or ""
 
     def me(self) -> str:
         r = self._s.get(f"{SPOTIFY_API}/me",
                         headers={"Authorization": f"Bearer {self._auth()}"},
                         timeout=20)
-        return r.json().get("id", "") if r.status_code == 200 else ""
+        return read_json(r, "Spotify").get("id") or "" if r.status_code == 200 else ""
 
     def my_playlists(self) -> list[SpotifyPlaylist]:
         """Everything on the signed-in account, own and followed."""
@@ -152,8 +178,8 @@ class Spotify:
                 raise ProviderError("Spotify sign-in expired, sign in again.")
             if r.status_code != 200:
                 raise ProviderError(f"Spotify returned {r.status_code} listing playlists.")
-            j = r.json()
-            for it in j.get("items", []):
+            j = read_json(r, "Spotify")
+            for it in j.get("items") or []:
                 if not it:
                     continue
                 # "tracks" was renamed "items" on the playlist object too.
@@ -188,7 +214,7 @@ class Spotify:
             raise ProviderError("Spotify sign-in expired - sign in again.")
         if r.status_code != 200:
             raise ProviderError(f"Spotify returned {r.status_code} for that playlist.")
-        j = r.json()
+        j = read_json(r, "Spotify")
         images = j.get("images") or []
         return {
             "name": j.get("name", "") or "",
@@ -249,7 +275,7 @@ class Spotify:
             raise ProviderError("Spotify sign-in expired, sign in again.")
         if r.status_code != 200:
             raise ProviderError(f"Spotify returned {r.status_code} for that search.")
-        return (r.json().get("tracks") or {}).get("items") or []
+        return (read_json(r, "Spotify").get("tracks") or {}).get("items") or []
 
     # ---------------- playback ----------------
     #
@@ -263,7 +289,10 @@ class Spotify:
                         timeout=15)
         if r.status_code != 200:
             return []
-        return r.json().get("devices", [])
+        try:
+            return read_json(r, "Spotify").get("devices") or []
+        except ProviderError:
+            return []
 
     def player_state(self) -> dict | None:
         """None when nothing is playing anywhere (Spotify answers 204)."""
@@ -370,7 +399,7 @@ class Spotify:
         """
         out = {}
         ids = [u.split(":")[-1] for u in uris if u.startswith("spotify:track:")]
-        for start in range(0, min(len(ids), 50), 50):
+        for start in range(0, len(ids), 50):
             chunk = ids[start:start + 50]
             try:
                 r = self._s.get(
@@ -382,9 +411,9 @@ class Spotify:
                 if r.status_code != 200:
                     continue
                 for t in (r.json().get("tracks") or []):
-                    if not t:
+                    if not isinstance(t, dict):
                         continue
-                    artists = ", ".join(a.get("name", "") for a in (t.get("artists") or []))
+                    artists = ", ".join(n for n in ((a or {}).get("name") for a in (t.get("artists") or [])) if n)
                     name = t.get("name", "")
                     out[t.get("uri", "")] = f"{artists} - {name}" if artists else name
             except Exception:
@@ -507,20 +536,26 @@ class Spotify:
                 raise ProviderError("Playlist not found.")
             if r.status_code != 200:
                 raise ProviderError(f"Spotify returned {r.status_code} reading tracks.")
-            j = r.json()
-            for entry in j.get("items", []):
+            j = read_json(r, "Spotify")
+            for entry in j.get("items") or []:
+                # A removed or unavailable track comes back as null (the entry, or its
+                # item); skip it rather than fail the whole playlist.
+                if not isinstance(entry, dict):
+                    continue
                 # Renamed from "track" to "item" in the February 2026 migration.
-                t = entry.get("item") or entry.get("track") or {}
-                uri = t.get("uri", "")
+                t = entry.get("item") or entry.get("track")
+                if not isinstance(t, dict):
+                    continue
+                uri = t.get("uri") or ""
                 if not uri or uri.startswith("spotify:local"):
                     continue
                 out.append(
                     SpotifyTrack(
-                        title=t.get("name", ""),
-                        artist=", ".join(a.get("name", "") for a in t.get("artists", [])),
+                        title=t.get("name") or "",
+                        artist=", ".join(n for n in ((a or {}).get("name") for a in (t.get("artists") or [])) if n),
                         uri=uri,
-                        isrc=(t.get("external_ids") or {}).get("isrc", ""),
-                        duration_ms=t.get("duration_ms", 0),
+                        isrc=(t.get("external_ids") or {}).get("isrc") or "",
+                        duration_ms=t.get("duration_ms") or 0,
                     )
                 )
             if progress:
@@ -541,14 +576,41 @@ class Features:
     bpm_conf: Optional[float] = None
     key_conf: Optional[float] = None
     isrc: str = ""
-    pending: bool = False      # queued for on-demand analysis, re-poll later
+    pending: bool = False      # queued for on-demand analysis, re-check later
     terminal: bool = False     # definitively not analysable, stop asking
     source: str = ""           # which pass resolved it
+    retry_after_days: Optional[float] = None   # FreqBlog's own "ask again in" hint
+
+
+def _retry_days(*dicts) -> Optional[float]:
+    """retry_after_days from the first of these replies that carries a usable one."""
+    for d in dicts:
+        if isinstance(d, dict) and d.get("retry_after_days") is not None:
+            try:
+                v = float(d["retry_after_days"])
+            except (TypeError, ValueError):
+                continue
+            if v >= 0:
+                return v
+    return None
+
+
+@dataclass
+class Usage:
+    """GET /me/stats, the key's monthly usage. Free: it doesn't count as a request."""
+    used: int
+    quota: int
+    pct: float
+    reset: str            # quota_reset_date as FreqBlog sent it
 
 
 class FreqBlog:
-    """BPM + Camelot key. Misses are queued for analysis and resolve in ~15s,
-    so a miss is a 'pending', not a failure."""
+    """BPM + Camelot key. A track FreqBlog doesn't have yet is queued for analysis
+    (202, usually ready within a minute), so a miss is a 'pending', not a failure.
+
+    Every lookup counts against the key's monthly allowance, a 202 too and on /bulk
+    too, so nothing here polls: the caller records queued tracks and asks again later
+    (see Store.mark_waiting). GET /me/stats is free and checks the key."""
 
     def __init__(self, api_key: str):
         self.api_key = api_key
@@ -603,17 +665,51 @@ class FreqBlog:
         r = self._send("GET", f"{FREQBLOG_API}/lookup", params=params, timeout=40)
 
         if r.status_code == 200:
-            return self._parse(r.json())
-        if r.status_code == 202:
-            return Features(pending=True)
-        if r.status_code == 404:
-            body = {}
+            return self._parse(read_json(r, "FreqBlog"))
+        body = {}
+        if r.status_code in (202, 404):
             try:
                 body = r.json()
-            except Exception:
+            except ValueError:
                 pass
-            return Features(terminal=bool(body.get("terminal", True)))
+            body = body if isinstance(body, dict) else {}
+        if r.status_code == 202:
+            return Features(pending=True, retry_after_days=_retry_days(body))
+        if r.status_code == 404:
+            return Features(terminal=bool(body.get("terminal", True)),
+                            retry_after_days=_retry_days(body))
         raise ProviderError(f"FreqBlog returned {r.status_code}.")
+
+    def stats(self, timeout: float = 15) -> Usage:
+        """GET /me/stats: is the key good, and how much of the month is used.
+        Raises KeyRejected with FreqBlog's own "detail" text on a 401, ProviderError
+        when FreqBlog can't be reached or answers oddly."""
+        if not self.api_key:
+            raise ProviderError("No FreqBlog key.")
+        try:
+            r = self._s.get(f"{FREQBLOG_API}/me/stats",
+                            headers={"X-API-Key": self.api_key}, timeout=timeout)
+        except requests.RequestException as e:
+            raise ProviderError(f"Couldn't reach FreqBlog ({type(e).__name__}).") from None
+        if r.status_code in (401, 403):
+            detail = ""
+            try:
+                j = r.json()
+                if isinstance(j, dict):
+                    detail = str(j.get("detail") or "").strip()
+            except ValueError:
+                pass
+            raise KeyRejected("FreqBlog", detail or f"FreqBlog answered {r.status_code}.")
+        if r.status_code != 200:
+            raise ProviderError(f"FreqBlog answered {r.status_code}.")
+        j = read_json(r, "FreqBlog")
+        try:
+            return Usage(used=int(j.get("requests_this_month") or 0),
+                         quota=int(j.get("monthly_quota") or 0),
+                         pct=float(j.get("quota_used_pct") or 0.0),
+                         reset=str(j.get("quota_reset_date") or ""))
+        except (TypeError, ValueError):
+            raise ProviderError("FreqBlog sent usage figures Playlist Flow couldn't read.") from None
 
     def bulk(self, items: Iterable[dict]) -> list[dict]:
         """Up to 50 per call. Each item: {track, artist?, isrc?}.
@@ -624,8 +720,9 @@ class FreqBlog:
         r = self._send("POST", f"{FREQBLOG_API}/bulk", json=payload, timeout=90)
         if r.status_code not in (200, 202):
             raise ProviderError(f"FreqBlog bulk returned {r.status_code}.")
-        j = r.json()
-        return j.get("results", j if isinstance(j, list) else [])
+        j = read_json(r, "FreqBlog", want=(dict, list))
+        rows = j if isinstance(j, list) else j.get("results")
+        return rows if isinstance(rows, list) else []
 
     def lookup_isrc(self, isrc: str, wait: int = 0) -> Features:
         """ISRC-only. Used as a second pass when a name match missed, ISRC is
@@ -634,12 +731,15 @@ class FreqBlog:
 
     @staticmethod
     def features_from_row(row: dict) -> Features:
-        if row.get("found") and row.get("result"):
+        if not isinstance(row, dict):
+            return Features(terminal=True)
+        if row.get("found") and isinstance(row.get("result"), dict):
             return FreqBlog._parse(row["result"])
+        days = _retry_days(row, row.get("result"))
         status = (row.get("backfill_status") or "").lower()
         if status in ("queued", "running", "pending"):
-            return Features(pending=True)
-        return Features(terminal=True)
+            return Features(pending=True, retry_after_days=days)
+        return Features(terminal=True, retry_after_days=days)
 
 
 # --------------------------------------------------------------------------

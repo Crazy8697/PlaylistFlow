@@ -22,10 +22,8 @@ dist/
 __pycache__/
 *.py[cod]
 
-# Generated icons (rebuild with makeicon.py)
+# Generated icon sizes for a look (rebuild with makeicon.py); icon.ico and icon.png are kept
 assets/icon_*.png
-# ...but the artwork they are generated FROM is source, not output.
-!assets/icon_source.png
 
 # Scratch
 *.log

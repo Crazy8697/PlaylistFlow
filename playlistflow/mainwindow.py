@@ -19,11 +19,12 @@ from PySide6.QtWidgets import (
     QToolBar, QToolButton, QTabWidget, QCheckBox,
 )
 
-from .domain import Track, seams, summary, valid_key, felt_bpm, seam_key, set_display
+from .domain import (Track, seams, summary, valid_key, felt_bpm, folded, reported_from_felt,
+                     seam_key, set_display)
 from .providers import Spotify, FreqBlog, GetSongBPM, ProviderError, Features, KeyRejected
 from .auth import SpotifyAuth, AuthError
 from .keys import clean_title, primary_artist
-from .store import Store
+from .store import Store, StoreError
 from pathlib import Path
 
 from . import __version__, __url__
@@ -42,6 +43,9 @@ from .updater import (UpdateChecker, UpdateDownloader, can_install, launch_setup
 from .finderdialog import FinderDialog
 
 UNDO_CAP = 40
+# A queued track's re-check runs by itself only when it is due this soon; later ones
+# wait for the next Fetch BPM/key (or the next time the playlist is opened).
+AUTO_RECHECK_MAX_S = 15 * 60
 COVER = 88                 # playlist cover in the bottom strip
 AUTOSAVE_MS = 1500
 
@@ -51,72 +55,82 @@ AUTOSAVE_MS = 1500
 # --------------------------------------------------------------------------
 
 class FetchWorker(QThread):
-    resolved = Signal(int, object)   # index, Features
+    """BPM/key lookups for a list of tracks, off the UI thread.
+
+    FreqBlog counts every lookup against the key's monthly allowance, a 202 "queued"
+    answer too and on /bulk too. So: /bulk, 50 tracks a call; only tracks that aren't
+    cached or waiting reach here (fetch_features filters them); and nothing is re-polled.
+    A queued track is reported through `waiting` and asked about again later on the
+    Store's schedule, never in a loop inside this fetch.
+
+    Results are matched to tracks by the Track object, not by row, so nothing lands
+    on the wrong row even if the list changed; the window also locks reordering while
+    a fetch runs.
+    """
+    resolved = Signal(object, object)   # Track, Features
+    waiting = Signal(object, str, object)   # Track, "queued" | "missing", retry_after_days
     message = Signal(str)
     done = Signal()
     keyRejected = Signal(str)        # provider name: its key was refused
 
     def __init__(self, fb: FreqBlog, gs: GetSongBPM,
-                 jobs: list[tuple[int, Track]], parent=None):
+                 jobs: list[Track], parent=None):
         super().__init__(parent)
         self.fb = fb
         self.gs = gs
-        self.jobs = jobs
+        self.jobs = list(jobs)
         self._stop = False
         self._got = 0
         self.fb_rejected = False      # once FreqBlog refuses the key, stop asking it
+        self.requests = 0             # FreqBlog track lookups sent (what the allowance counts)
+        self.calls = 0                # FreqBlog HTTP calls made
 
     def stop(self):
         self._stop = True
 
     # -- helpers ---------------------------------------------------------
 
-    def _sleep(self, seconds: int) -> bool:
-        for _ in range(seconds):
-            if self._stop:
-                return False
-            time.sleep(1)
-        return True
-
-    def _emit(self, idx: int, feat: Features, source: str):
+    def _emit(self, trk: Track, feat: Features, source: str):
         feat.source = source
         self._got += 1
-        self.resolved.emit(idx, feat)
+        self.resolved.emit(trk, feat)
 
     def _bulk_pass(self, jobs, build, source):
-        """Run jobs through /bulk. Returns (pending, missed)."""
-        pending, missed = [], []
+        """Run tracks through /bulk, 50 a call. Returns (queued, missed), each a list of
+        (Track, Features)."""
+        queued, missed = [], []
         for start in range(0, len(jobs), 50):
             if self._stop or self.fb_rejected:
-                return pending, missed + jobs[start:]
+                return queued, missed + [(t, Features(terminal=True)) for t in jobs[start:]]
             chunk = jobs[start:start + 50]
             try:
-                rows = self.fb.bulk([build(t) for _, t in chunk])
+                self.calls += 1
+                self.requests += len(chunk)
+                rows = self.fb.bulk([build(t) for t in chunk])
             except KeyRejected:
                 self.fb_rejected = True
                 self.keyRejected.emit("FreqBlog")
-                missed.extend(chunk)
+                missed.extend((t, Features(terminal=True)) for t in chunk)
                 continue
             except ProviderError as e:
                 self.message.emit(str(e))
-                missed.extend(chunk)
+                missed.extend((t, Features(terminal=True)) for t in chunk)
                 continue
-            for (idx, trk), row in zip(chunk, rows):
+            rows = list(rows) + [{}] * (len(chunk) - len(rows))
+            for trk, row in zip(chunk, rows):
                 feat = FreqBlog.features_from_row(row)
                 if feat.pending:
-                    pending.append((idx, trk))
+                    queued.append((trk, feat))
                 elif feat.terminal or not (feat.bpm or feat.camelot):
-                    missed.append((idx, trk))
+                    missed.append((trk, feat))
                 else:
-                    self._emit(idx, feat, source)
-        return pending, missed
+                    self._emit(trk, feat, source)
+        return queued, missed
 
     # -- main ------------------------------------------------------------
 
     def run(self):
         total = len(self.jobs)
-
-        remaining = self.jobs
 
         def full(t: Track) -> dict:
             item = {"track": t.title}
@@ -126,57 +140,50 @@ class FetchWorker(QThread):
                 item["isrc"] = t.isrc
             return item
 
-        # Pass 1, ISRC + name together.
-        self.message.emit(f"Looking up {len(remaining)} track(s)…")
-        pending, missed = self._bulk_pass(remaining, full, "freqblog")
+        # Pass 1, ISRC + name together, through /bulk.
+        self.message.emit(f"Looking up {total} track(s)…")
+        queued, missed = self._bulk_pass(self.jobs, full, "freqblog")
 
-        # Pass 2, re-poll whatever got queued for on-demand analysis (~15s each).
-        rounds = 0
-        while pending and rounds < 5 and not self._stop and not self.fb_rejected:
-            rounds += 1
-            self.message.emit(
-                f"{len(pending)} being analysed by FreqBlog, waiting (round {rounds})…")
-            if not self._sleep(20):
-                break
-            still, gone = self._bulk_pass(pending, full, "freqblog")
-            pending, missed = still, missed + gone
+        # No re-poll here: queued tracks are being analysed and get asked about again
+        # later (Store.mark_waiting), which is what keeps a free key inside its allowance.
 
-        missed += pending  # never resolved in the time we allowed
-
-        # Pass 3, ISRC alone. An exact key; catches names that matched wrongly.
+        # Pass 2, ISRC alone, for tracks FreqBlog said it doesn't have. An exact key;
+        # catches names that matched wrongly.
         if missed and not self._stop and not self.fb_rejected:
-            have_isrc = [(i, t) for i, t in missed if t.isrc]
+            have_isrc = [(t, f) for t, f in missed if t.isrc]
             if have_isrc:
                 self.message.emit(f"Retrying {len(have_isrc)} by ISRC…")
                 still = []
-                for idx, trk in have_isrc:
+                for n, (trk, f) in enumerate(have_isrc):
                     if self._stop:
+                        still.extend(have_isrc[n:])
                         break
                     try:
-                        feat = self.fb.lookup_isrc(trk.isrc, wait=8)
+                        self.calls += 1
+                        self.requests += 1
+                        feat = self.fb.lookup_isrc(trk.isrc)
                     except KeyRejected:
                         self.fb_rejected = True
                         self.keyRejected.emit("FreqBlog")
-                        still.extend(have_isrc[have_isrc.index((idx, trk)):])
+                        still.extend(have_isrc[n:])
                         break
                     except ProviderError as e:
                         self.message.emit(str(e))
-                        still.append((idx, trk))
+                        still.append((trk, f))
                         continue
                     if feat.bpm or feat.camelot:
-                        self._emit(idx, feat, "freqblog")
+                        self._emit(trk, feat, "freqblog")
+                    elif feat.pending:
+                        queued.append((trk, feat))
                     else:
-                        still.append((idx, trk))
-                missed = still + [(i, t) for i, t in missed if not t.isrc]
+                        still.append((trk, feat))
+                missed = still + [(t, f) for t, f in missed if not t.isrc]
 
-        # Pass 4, cleaned title / first artist only.
+        # Pass 3, cleaned title / first artist only, through /bulk.
         if missed and not self._stop and not self.fb_rejected:
-            retry = []
-            for idx, trk in missed:
-                ct = clean_title(trk.title)
-                pa = primary_artist(trk.artist)
-                if ct or (pa and pa != trk.artist):
-                    retry.append((idx, trk))
+            retry = [t for t, _ in missed
+                     if clean_title(t.title) or
+                     (primary_artist(t.artist) and primary_artist(t.artist) != t.artist)]
             if retry:
                 self.message.emit(f"Retrying {len(retry)} with cleaned titles…")
 
@@ -184,35 +191,48 @@ class FetchWorker(QThread):
                     return {"track": clean_title(t.title) or t.title,
                             "artist": primary_artist(t.artist) or t.artist}
 
-                _, still = self._bulk_pass(retry, cleaned, "freqblog")
-                done_ids = {i for i, _ in retry} - {i for i, _ in still}
-                missed = [(i, t) for i, t in missed if i not in done_ids]
+                q2, m2 = self._bulk_pass(retry, cleaned, "freqblog")
+                settled = {id(t) for t in retry} - {id(t) for t, _ in m2}
+                missed = [(t, f) for t, f in missed if id(t) not in settled]
+                queued += q2
 
-        # Pass 5, GetSongBPM. Thin coverage here, but free and already keyed.
-        if missed and not self._stop and self.gs.api_key:
-            self.message.emit(f"Trying GetSongBPM for the last {len(missed)}…")
-            still = []
-            for idx, trk in missed:
+        # Pass 4, GetSongBPM. Thin coverage here, but free and already keyed. It also
+        # gets a try at queued tracks: an answer there saves FreqBlog a re-check.
+        if (missed or queued) and not self._stop and self.gs.api_key:
+            pool = missed + queued
+            self.message.emit(f"Trying GetSongBPM for the last {len(pool)}…")
+            found = set()
+            for n, (trk, _) in enumerate(pool):
                 if self._stop:
                     break
                 try:
                     feat = self.gs.lookup(trk.title, trk.artist)
                 except KeyRejected:
                     self.keyRejected.emit("GetSongBPM")
-                    still.extend(missed[missed.index((idx, trk)):])
                     break
+                except ProviderError:
+                    continue
                 if feat.bpm or feat.camelot:
-                    self._emit(idx, feat, "getsongbpm")
-                else:
-                    still.append((idx, trk))
-            missed = still
+                    self._emit(trk, feat, "getsongbpm")
+                    found.add(id(trk))
+            missed = [(t, f) for t, f in missed if id(t) not in found]
+            queued = [(t, f) for t, f in queued if id(t) not in found]
 
+        # when to ask again: recorded by the window (Store.mark_waiting)
+        if not self.fb_rejected:
+            for trk, f in queued:
+                self.waiting.emit(trk, "queued", f.retry_after_days)
+            for trk, f in missed:
+                self.waiting.emit(trk, "missing", f.retry_after_days)
+
+        tail = []
+        if queued:
+            tail.append(f"{len(queued)} being analysed by FreqBlog, checked again in a few "
+                        "minutes")
         if missed:
-            self.message.emit(
-                f"Fetched {self._got} of {total}. {len(missed)} not found anywhere, "
-                f"type those in.")
-        else:
-            self.message.emit(f"Fetched {self._got} of {total}.")
+            tail.append(f"{len(missed)} not found anywhere, type those in")
+        self.message.emit(f"Fetched {self._got} of {total}." +
+                          (" " + "; ".join(tail) + "." if tail else ""))
         self.done.emit()
 
 
@@ -363,7 +383,9 @@ FreqBlog or GetSongBPM.</span></p>
 <p><b>Network</b>: besides Spotify and the BPM/key services you set up yourself, the only
 request is GitHub's latest-release lookup for Playlist Flow (at startup if Settings &gt;
 Display &gt; "Check for updates at startup" is on, or Help &gt; Check for updates) and, if
-you choose to update, the installer download. No telemetry.</p>
+you choose to update, the installer download. No telemetry. While setup's Spotify sign-in
+step waits for your browser, it listens on 127.0.0.1 (this PC only) and stops as soon as the
+sign-in arrives.</p>
 <p style="margin-top:12px">By <b>DarkRelay</b> &nbsp;&middot;&nbsp; {a("https://darkrelay.net", "darkrelay.net")}
 &nbsp;&middot;&nbsp; Version {__version__}<br>
 Free software under the Apache License 2.0; it comes with NO WARRANTY. The components it
@@ -597,6 +619,10 @@ class MainWindow(QMainWindow):
         self._autosave.setSingleShot(True)
         self._autosave.setInterval(AUTOSAVE_MS)
         self._autosave.timeout.connect(self._write_auto)
+        # the one automatic re-check of tracks FreqBlog queued (see _schedule_recheck)
+        self._recheck = QTimer(self)
+        self._recheck.setSingleShot(True)
+        self._recheck.timeout.connect(self._run_recheck)
 
         # Transport polling. Spotify has no push channel, so the bar is driven
         # by polling, slow when idle, quicker while something is playing.
@@ -669,7 +695,7 @@ class MainWindow(QMainWindow):
         self._reload_env()
         self._warned.clear()
         if self.prefs.storage_dir != old_dir and self.store is not None:
-            self.store = Store(self.prefs.storage_dir)
+            self._open_store(self.prefs.storage_dir)
             self.refresh_saved()
         self.status("Setup saved.")
         if self.auth.authorised and self.store is not None:
@@ -1361,7 +1387,7 @@ class MainWindow(QMainWindow):
         old_dir = self.store.root if self.store else None
         self._reload_env()
         if self.prefs.storage_dir and str(old_dir) != self.prefs.storage_dir:
-            self.store = Store(self.prefs.storage_dir)
+            self._open_store(self.prefs.storage_dir)
             self.refresh_saved()
         self.status("Settings saved.")
 
@@ -1392,12 +1418,23 @@ class MainWindow(QMainWindow):
         self._autosave.setInterval(max(1, d["autosave_s"]) * 1000)
         self.refresh(keep_undo=True)
 
+    def _open_store(self, folder) -> bool:
+        """Point the window at a playlist folder. A folder that can't be used is said
+        plainly (and the previous one, if any, stays in use) instead of crashing."""
+        try:
+            self.store = Store(folder)
+            return True
+        except StoreError as e:
+            QMessageBox.warning(self, "Playlist folder", str(e))
+            self.status(str(e))
+            return False
+
     def _ensure_storage(self):
         d = self.prefs.storage_dir
         if not d:
             d = str(Path.home() / "Documents" / "PlaylistFlow")
             self.prefs.storage_dir = d
-        self.store = Store(d)
+        self._open_store(d)
         self.refresh_saved()
         if self.auth.authorised:
             QTimer.singleShot(0, self.refresh_spotify)
@@ -1407,9 +1444,8 @@ class MainWindow(QMainWindow):
     def choose_storage(self):
         d = QFileDialog.getExistingDirectory(self, "Pick a folder for saved playlists",
                                              self.prefs.storage_dir or "")
-        if d:
+        if d and self._open_store(d):
             self.prefs.storage_dir = d
-            self.store = Store(d)
             self.refresh_saved()
             self.status(f"Storage folder is now {d}")
 
@@ -1433,8 +1469,14 @@ class MainWindow(QMainWindow):
         name = self._selected_saved()
         if not name:
             return
+        try:
+            tracks = self.store.load(name)
+        except StoreError as e:
+            QMessageBox.warning(self, "Open playlist", str(e))
+            self.status(str(e))
+            return
         self.snapshot()
-        self.tracks = self.store.load(name)
+        self.tracks = tracks
         self.current_pid = self.store.last_loaded_pid
         self.current_desc = self.store.last_loaded_desc
         self.approved = set(self.store.last_loaded_checked)
@@ -1490,9 +1532,14 @@ class MainWindow(QMainWindow):
                 return
             name = name.strip()
         self.current_name = name
-        self.store.save(name, self.tracks, auto=False, pid=self.current_pid,
-                        description=self.current_desc,
-                        ear_checked=sorted(self.approved))
+        try:
+            self.store.save(name, self.tracks, auto=False, pid=self.current_pid,
+                            description=self.current_desc,
+                            ear_checked=sorted(self.approved))
+        except StoreError as e:
+            QMessageBox.warning(self, "Save playlist", str(e))
+            self.status(str(e))
+            return
         self._dirty = False
         self.refresh_saved()
         self.status(f"Saved {name}.")
@@ -1501,9 +1548,12 @@ class MainWindow(QMainWindow):
         if not self.display.get("autosave_on", True):
             return
         if self.store and self.current_name and self.tracks:
-            self.store.save(self.current_name, self.tracks, auto=True,
-                            pid=self.current_pid, description=self.current_desc,
-                            ear_checked=sorted(self.approved))
+            try:
+                self.store.save(self.current_name, self.tracks, auto=True,
+                                pid=self.current_pid, description=self.current_desc,
+                                ear_checked=sorted(self.approved))
+            except StoreError as e:
+                self.status(f"Auto-save failed: {e}")     # said in the status bar, no popup loop
 
     # ---------------- undo ----------------
 
@@ -1513,7 +1563,20 @@ class MainWindow(QMainWindow):
         if len(self.undo_stack) > UNDO_CAP:
             self.undo_stack.pop(0)
 
+    def fetching(self) -> bool:
+        return bool(self.worker and self.worker.isRunning())
+
+    def _locked(self, what: str) -> bool:
+        """True (and said in the status bar) while a BPM/key fetch runs: reordering,
+        deleting or undoing then would change the list under it."""
+        if self.fetching():
+            self.status(f"Wait for the BPM/key lookup to finish before you {what}.")
+            return True
+        return False
+
     def undo(self):
+        if self._locked("undo"):
+            return
         if not self.undo_stack:
             self.status("Nothing to undo.")
             return
@@ -1601,6 +1664,8 @@ class MainWindow(QMainWindow):
         """
         if not self.current_pid:
             self.status("This playlist did not come from Spotify.")
+            return
+        if self._locked("sync"):
             return
         if not self.auth.authorised and not self.sign_in():
             return
@@ -1755,10 +1820,17 @@ class MainWindow(QMainWindow):
             if not name:
                 self.status("Nothing added, no playlist chosen.")
                 return
+            if how == "existing":
+                try:
+                    loaded = self.store.load(name)
+                except StoreError as e:
+                    QMessageBox.warning(self, "Open playlist", str(e))
+                    self.status(str(e))
+                    return
             self.snapshot()
             snapped = True
             if how == "existing":
-                self.tracks = self.store.load(name)
+                self.tracks = loaded
                 self.current_pid = self.store.last_loaded_pid
                 self.approved = set(self.store.last_loaded_checked)
             else:
@@ -1781,9 +1853,12 @@ class MainWindow(QMainWindow):
             self.tracks.append(t)
         self.refresh()
         if self.store and self.current_name:
-            self.store.save(self.current_name, self.tracks, auto=False,
-                            pid=self.current_pid, description=self.current_desc,
-                            ear_checked=sorted(self.approved))
+            try:
+                self.store.save(self.current_name, self.tracks, auto=False,
+                                pid=self.current_pid, description=self.current_desc,
+                                ear_checked=sorted(self.approved))
+            except StoreError as e:
+                self.status(str(e))
             self.refresh_saved()
         msg = "Added %d tracks to %s" % (len(fresh), self.current_name or "the playlist")
         if skipped:
@@ -1870,29 +1945,74 @@ class MainWindow(QMainWindow):
             bits.append(f"{unknown} skipped (missing BPM/key)")
         self.status(" · ".join(bits) + ".")
 
-    def fetch_features(self, force: bool = False):
+    def fetch_features(self, force: bool = False, only=None):
+        """Look up BPM/key for the tracks that need it: not typed in by hand, not
+        resolved (cached values were applied when the playlist was opened), and not
+        inside a FreqBlog wait (queued or not found, see Store.mark_waiting). force
+        ignores the waits, never the cache. only: limit to these cache keys (the
+        automatic re-check of queued tracks)."""
         if not self.tracks:
             return
-        if self.worker and self.worker.isRunning():
+        if self.fetching():
             self.status("Already fetching.")
             return
-        jobs = [(i, t) for i, t in enumerate(self.tracks)
-                if not t.manual and (force or not t.resolved)]
+        st = self.store
+        need = [t for t in self.tracks if not t.manual and not t.resolved]
+        if only is not None and st is not None:
+            need = [t for t in need if st.cache_key(t) in only]
+        jobs = [t for t in need if force or st is None or st.lookup_due(t)]
         if not jobs:
-            self.status("Everything is already resolved.")
+            if need:
+                self.status(f"{len(need)} track(s) are waiting on FreqBlog (being analysed, "
+                            "or not found recently), so nothing was sent.")
+            elif only is None:
+                self.status("Everything is already resolved.")
             return
         self.worker = FetchWorker(self.freqblog, self.getsongbpm, jobs, self)
         self.worker.keyRejected.connect(self._key_rejected)
         self.worker.resolved.connect(self._apply_feature)
+        self.worker.waiting.connect(self._mark_waiting)
         self.worker.message.connect(self.status)
         self.worker.done.connect(self._fetch_done)
         self.busy_on(f"Looking up {len(jobs)} track(s)…")
         self.worker.start()
 
-    def _apply_feature(self, idx: int, feat: Features):
-        if idx >= len(self.tracks):
+    def _mark_waiting(self, trk: Track, kind: str, days):
+        if self.store is not None:
+            self.store.mark_waiting(trk, kind, days)
+
+    def _schedule_recheck(self):
+        """One automatic re-check of queued tracks, when the first is due soon. It is
+        a single timer, restarted after each fetch; later re-checks happen on the next
+        fetch. Only queued tracks of the open playlist are asked about."""
+        self._recheck.stop()
+        if self.store is None or not self.tracks:
             return
-        t = self.tracks[idx]
+        now = time.time()
+        due = {}
+        for t in self.tracks:
+            if t.manual or t.resolved:
+                continue
+            w = self.store.waiting(t)
+            if w and w.get("kind") == "queued":
+                due[self.store.cache_key(t)] = float(w.get("next") or now)
+        if not due:
+            return
+        first = min(due.values())
+        if first - now > AUTO_RECHECK_MAX_S:
+            return
+        self._recheck_keys = set(due)
+        self._recheck.start(int(max(1.0, first - now + 1) * 1000))
+
+    def _run_recheck(self):
+        keys = getattr(self, "_recheck_keys", set())
+        if keys and not self.fetching():
+            self.fetch_features(only=keys)
+
+    def _apply_feature(self, t: Track, feat: Features):
+        # Matched by the Track itself, never by row. A track no longer in the open list
+        # (another playlist was opened meanwhile) still gets cached, so the request
+        # that found it isn't wasted, but nothing on screen changes.
         if t.manual:          # a manual value is never replaced by a fetch
             return
         if feat.bpm > 0:
@@ -1904,8 +2024,10 @@ class MainWindow(QMainWindow):
         if feat.isrc and not t.isrc:
             t.isrc = feat.isrc
         t.source = feat.source or "freqblog"
-        if t.resolved:
+        if t.resolved and self.store is not None:
             self.store.cache_put(t)
+        if not any(x is t for x in self.tracks):
+            return
         # Update the counts immediately, that is the number being watched
         # but coalesce the expensive full table rebuild, or 49 results in quick
         # succession starve the repaint and nothing appears to move.
@@ -1917,9 +2039,10 @@ class MainWindow(QMainWindow):
         self.busy_off()
         self.refresh(keep_undo=True)
         self._autosave.start()
+        self._schedule_recheck()
 
     def delete_rows(self, rows: list[int]):
-        if not rows:
+        if not rows or self._locked("delete tracks"):
             return
         self.snapshot()
         for r in sorted(rows, reverse=True):
@@ -1934,6 +2057,8 @@ class MainWindow(QMainWindow):
         the end either way, so an unresolved track never lands mid-run.
         """
         if len(self.tracks) < 2:
+            return
+        if self._locked("sort"):
             return
         if self._sort_field == field:
             self._sort_desc = not self._sort_desc
@@ -1965,6 +2090,9 @@ class MainWindow(QMainWindow):
     def move_row(self, src: int, dst: int):
         if src == dst or not (0 <= src < len(self.tracks)):
             return
+        if self._locked("move tracks"):
+            self.refresh(keep_undo=True)      # put a dragged row back where it was
+            return
         self.snapshot()
         t = self.tracks.pop(src)
         self.tracks.insert(max(0, min(dst, len(self.tracks))), t)
@@ -1985,9 +2113,9 @@ class MainWindow(QMainWindow):
                 return
             # The cell shows felt BPM in felt view; store the reported value.
             if self.felt and v > 0:
-                reported = t.bpm
-                if reported >= 130 and abs(v - reported / 2) > 0.6:
-                    v = v * 2
+                if t.bpm > 0 and v == round(felt_bpm(t.bpm)):
+                    return          # retyped what was shown: nothing changed
+                v = reported_from_felt(v, folded(t.bpm))
             if v == t.bpm:
                 return
             self.snapshot()
@@ -2333,7 +2461,7 @@ class MainWindow(QMainWindow):
     def copy_tracks(self, rows: list):
         """Copy the selected tracks as "Artist - Title", one per line.
 
-        Separate from Copy URIs: this is the form that goes into a search box or
+        Separate from the URI export: this is the form that goes into a search box or
         a message to somebody, rather than into Spotify.
         """
         picked = [self.tracks[r] for r in rows if 0 <= r < len(self.tracks)]
@@ -2352,14 +2480,6 @@ class MainWindow(QMainWindow):
 
     def uri_block(self) -> str:
         return "\n".join(t.uri for t in self.tracks if t.uri)
-
-    def copy_uris(self):
-        text = self.uri_block()
-        if not text.strip():
-            self.status("Nothing to copy, no track URIs in this playlist.")
-            return
-        QGuiApplication.clipboard().setText(text)
-        self.status(f"Copied {len(text.splitlines())} URIs.")
 
     def export_uris(self):
         """The URI block, on demand.

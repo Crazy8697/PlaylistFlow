@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 120 120">
+  <title>Playlist Flow (16 and 24 px)</title>
+  <!-- The Funnel A master (icon.svg) for the smallest sizes: same layout, thicker
+       strokes, staff lines dropped, so it stays readable at 16 and 24 px. -->
+  <rect width="120" height="120" rx="24" fill="#0a0e14"/>
+  <rect x="18" y="18" width="84" height="84" rx="16" fill="#0f2530"/>
+  <rect x="18" y="18" width="84" height="84" rx="16" fill="none" stroke="#19C2E6" stroke-width="8"/>
+  <g stroke="#19C2E6" stroke-width="7" stroke-linecap="round" fill="none">
+    <line x1="29" y1="35" x2="62" y2="60"/>
+    <line x1="42" y1="54" x2="62" y2="60"/>
+    <line x1="31" y1="83" x2="62" y2="60"/>
+    <line x1="62" y1="60" x2="90" y2="60"/>
+  </g>
+  <circle cx="29" cy="35" r="4" fill="#0E7490" stroke="#19C2E6" stroke-width="4"/>
+  <circle cx="42" cy="54" r="3.5" fill="#0E7490" stroke="#19C2E6" stroke-width="4"/>
+  <circle cx="31" cy="83" r="5" fill="#0E7490" stroke="#19C2E6" stroke-width="4"/>
+  <circle cx="62" cy="60" r="4.5" fill="#0E7490" stroke="#19C2E6" stroke-width="4"/>
+  <circle cx="90" cy="60" r="9" fill="#19C2E6"/>
+</svg>

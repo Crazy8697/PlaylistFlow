@@ -1,6 +1,6 @@
 # Playlist Flow end user agreement
 
-Version 2026-10-17. This agreement is between you and DarkRelay (Crazy8697), the publisher of
+Version 2026-10-17.2. This agreement is between you and DarkRelay (Crazy8697), the publisher of
 Playlist Flow for Windows. You accept it in the program's setup, before you sign in to Spotify.
 If you do not agree, do not use Playlist Flow.
 

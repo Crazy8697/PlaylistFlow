@@ -1,13 +1,15 @@
-"""Spotify user authorisation, PKCE, with the redirect pasted back by hand.
+"""Spotify user authorisation, PKCE.
 
 Spotify killed Client Credentials for playlist items: GET /playlists/{id}/items
 answers 401 "Valid user authentication required". Development Mode grants
 playlist access only to the playlist's creator or a collaborator, and Client
 Credentials carries no identity to check, so no amount of permission fixes it.
 
-The redirect lands on a dead 127.0.0.1 URL that the browser fails to load. The
-user copies that URL out of the address bar and pastes it in. Nothing listens on
-a port, the "no local web server" constraint stays intact.
+The redirect goes to http://127.0.0.1:<port>/callback. While the wizard's sign-in
+step waits, callback.py listens there (127.0.0.1 only) and hands the address over;
+when that port can't be bound, the user copies the address out of the browser and
+pastes it instead. Either way the address goes through complete(), which checks the
+state parameter against the one this sign-in sent.
 
 PKCE rather than the client secret: a secret shipped inside a distributed binary
 is not a secret, and PKCE is the documented desktop path.
@@ -17,12 +19,14 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import os
-import re
 import time
 import urllib.parse
 
 import requests
+
+from .providers import ProviderError
 
 AUTH_URL = "https://accounts.spotify.com/authorize"
 TOKEN_URL = "https://accounts.spotify.com/api/token"
@@ -148,42 +152,54 @@ class SpotifyAuth:
     # ---------------- step 2 ----------------
 
     def complete(self, pasted: str) -> None:
-        """Take the pasted redirect URL (or a bare code) and get tokens."""
+        """Take the redirect address (caught by the listener or pasted) and get tokens.
+
+        The address must carry the state this sign-in sent: a missing or different
+        one means it belongs to another sign-in (or was forged), so it is refused
+        before any code is exchanged."""
         pasted = (pasted or "").strip()
         if not pasted:
             raise AuthError("Nothing pasted.")
-        if not self._verifier:
+        if not self._verifier or not self._state:
             raise AuthError("Start the sign-in again, the session was lost.")
+        if "code=" not in pasted and "error=" not in pasted:
+            raise AuthError("Couldn't find a code in that. Paste the whole URL.")
 
-        code = ""
-        if "code=" in pasted:
-            parsed = urllib.parse.urlparse(pasted)
-            params = urllib.parse.parse_qs(parsed.query)
-            if "error" in params:
-                raise AuthError(f"Spotify refused: {params['error'][0]}")
-            code = (params.get("code") or [""])[0]
-            got_state = (params.get("state") or [""])[0]
-            if got_state and self._state and got_state != self._state:
-                raise AuthError("State mismatch, start the sign-in again.")
-        elif re.fullmatch(r"[A-Za-z0-9_\-]+", pasted):
-            code = pasted
+        params = urllib.parse.parse_qs(urllib.parse.urlparse(pasted).query)
+        got_state = (params.get("state") or [""])[0]
+        if not got_state:
+            raise AuthError("State missing, start the sign-in again.")
+        if not hmac.compare_digest(got_state, self._state):
+            raise AuthError("State mismatch, start the sign-in again.")
+        if "error" in params:
+            raise AuthError(f"Spotify refused: {params['error'][0]}")
+        code = (params.get("code") or [""])[0]
         if not code:
             raise AuthError("Couldn't find a code in that. Paste the whole URL.")
 
-        r = requests.post(
-            TOKEN_URL,
-            data={
-                "grant_type": "authorization_code",
-                "code": code,
-                "redirect_uri": self.redirect_uri,
-                "client_id": self.client_id,
-                "code_verifier": self._verifier,
-            },
-            timeout=25,
-        )
+        try:
+            r = requests.post(
+                TOKEN_URL,
+                data={
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "redirect_uri": self.redirect_uri,
+                    "client_id": self.client_id,
+                    "code_verifier": self._verifier,
+                },
+                timeout=25,
+            )
+        except requests.RequestException:
+            raise AuthError("Couldn't reach Spotify to finish the sign-in. Check your "
+                            "connection and try again.") from None
         if r.status_code != 200:
             raise AuthError(f"Token exchange failed ({r.status_code}): {r.text[:200]}")
-        j = r.json()
+        try:
+            j = r.json()
+        except ValueError:
+            raise AuthError("Spotify's sign-in reply couldn't be read. Try again.") from None
+        # one address, one sign-in: the same state can't be used twice
+        self._state = ""
         self._access = j.get("access_token", "")
         self._expires = time.time() + j.get("expires_in", 3600)
         if j.get("refresh_token"):
@@ -198,22 +214,33 @@ class SpotifyAuth:
             return self._access
         if not self.refresh_token:
             raise AuthError("Not signed in to Spotify yet.")
-        r = requests.post(
-            TOKEN_URL,
-            data={
-                "grant_type": "refresh_token",
-                "refresh_token": self.refresh_token,
-                "client_id": self.client_id,
-            },
-            timeout=25,
-        )
+        try:
+            r = requests.post(
+                TOKEN_URL,
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": self.refresh_token,
+                    "client_id": self.client_id,
+                },
+                timeout=25,
+            )
+        except requests.RequestException:
+            # offline is not a dead sign-in: keep it, and say so plainly
+            raise ProviderError("Couldn't reach Spotify. Check your connection and "
+                                "try again.") from None
+        if r.status_code >= 500 or r.status_code == 429:
+            raise ProviderError(f"Spotify is having trouble ({r.status_code}). Try again "
+                                "in a moment.")
         if r.status_code != 200:
             # Refresh tokens can be revoked out from under us; make the caller
             # re-authorise rather than dying.
             self.forget()
             self._dead()
             raise AuthError("Spotify sign-in expired, sign in again.")
-        j = r.json()
+        try:
+            j = r.json()
+        except ValueError:
+            raise ProviderError("Spotify's reply couldn't be read. Try again in a moment.") from None
         self._access = j.get("access_token", "")
         self._expires = time.time() + j.get("expires_in", 3600)
         if j.get("refresh_token"):

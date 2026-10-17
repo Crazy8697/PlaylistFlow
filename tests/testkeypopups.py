@@ -1,5 +1,7 @@
 import sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import nonet  # noqa: F401  (no network in tests)
 """Key-failure handling: rejected keys, rate limits, misses, a dead Spotify sign-in.
 
 Every HTTP response is mocked; settings are a throwaway .ini; no window is shown and
@@ -158,10 +160,10 @@ class FakeGS:
 
 ffb, fgs = FakeFB(), FakeGS()
 tracks = [Track(title=f"T{i}", artist="A", isrc=f"ISRC{i}") for i in range(3)]
-wk = mw.FetchWorker(ffb, fgs, list(enumerate(tracks)))
+wk = mw.FetchWorker(ffb, fgs, list(tracks))
 emitted, resolved = [], []
 wk.keyRejected.connect(emitted.append)
-wk.resolved.connect(lambda i, f: resolved.append(i))
+wk.resolved.connect(lambda t, f: resolved.append(t))
 wk._sleep = lambda s: True
 wk.run()
 ok("a rejected FreqBlog key is reported once", emitted == ["FreqBlog"], str(emitted))
@@ -186,7 +188,7 @@ class MissFB(FakeFB):
 
 
 rgs = RejectGS()
-wk = mw.FetchWorker(MissFB(), rgs, list(enumerate(tracks)))
+wk = mw.FetchWorker(MissFB(), rgs, list(tracks))
 emitted.clear()
 wk.keyRejected.connect(emitted.append)
 wk._sleep = lambda s: True

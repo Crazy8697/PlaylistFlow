@@ -1,5 +1,7 @@
 import sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import nonet  # noqa: F401  (no network in tests)
 """The updater against a fake local GitHub. No real network, no real settings.
 
 Everything runs isolated: a temp APPDATA (keys are synthetic placeholders), a throwaway

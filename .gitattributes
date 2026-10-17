@@ -7,3 +7,5 @@ tests/testwizard.py -export-ignore
 tests/testkeypopups.py -export-ignore
 tests/testagreement.py -export-ignore
 tests/shotall.py -export-ignore
+tests/teststage8.py -export-ignore
+tests/nonet.py -export-ignore

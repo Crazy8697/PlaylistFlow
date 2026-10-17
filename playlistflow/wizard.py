@@ -11,20 +11,26 @@ Where things go, unchanged from before:
   - the Spotify sign-in: HKCU (QSettings), through SpotifyAuth, as before,
   - the storage folder choice: QSettings storage_dir. Playlists are never moved.
 
-Sign-in stays the paste-back PKCE flow: nothing listens on the redirect port.
-The port still matters, because it is part of the redirect URI registered on the
-user's Spotify app, and a port some other program is listening on would receive
-the sign-in code, so the wizard picks a free one before showing the URI.
+Sign-in is PKCE. While the sign-in step waits for the browser, callback.py listens
+on 127.0.0.1 at the chosen port, catches Spotify's redirect and the step finishes by
+itself; the listener stops right after (and on cancel, timeout or leaving the step).
+If the port can't be bound, the user pastes the address from the browser instead.
+A port some other program is listening on would receive the sign-in code, so the
+wizard picks a free one before showing the redirect URI.
+
+The FreqBlog key is checked with one GET /me/stats call (free, it doesn't count
+against the monthly allowance), which also gives the usage line shown on that step.
 """
 
 from __future__ import annotations
 
 import re
 import socket
+from html import escape as html_escape
 from pathlib import Path
 
 import requests
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import QThread, QTimer, Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFileDialog, QHBoxLayout, QLabel,
                                QLineEdit, QMessageBox, QPushButton, QStackedWidget, QTabWidget,
@@ -32,8 +38,10 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFileDialog, QHBox
 
 from . import theme
 from .auth import AuthError, redirect_uri
+from .callback import CallbackListener
 from .config import (DEFAULT_REDIRECT_PORT, _read_env_file, env_path, load_env, save_env)
 from .docs import AGREEMENT_VERSION, read_doc
+from .freqcheck import check_key, usage_text
 from .providers import UA
 
 DASHBOARD_URL = "https://developer.spotify.com/dashboard"
@@ -49,21 +57,56 @@ TITLES = ("Welcome", "Spotify app", "Privacy and terms", "Sign in", "FreqBlog ke
 
 # Formats, checked before anything is saved. Loose enough for any real key,
 # tight enough to catch a paste of the wrong thing.
-SPOTIFY_ID_RE = re.compile(r"[0-9a-fA-F]{32}")
+SPOTIFY_ID_RE = re.compile(r"[A-Za-z0-9]{32}")
 FREQBLOG_RE = re.compile(r"[A-Za-z0-9_\-]{20,128}")
 GETSONGBPM_RE = re.compile(r"[A-Za-z0-9]{16,64}")
+SIGNIN_TIMEOUT_MS = 5 * 60 * 1000     # how long the automatic sign-in waits for the browser
+
+# A label pasted along with a key: "Spotify client ID:", "Client ID =", "API key -", ...
+_LABEL_RE = re.compile(r"^\s*[A-Za-z][A-Za-z0-9 _()./]*?\s*(?::|=|\s-\s)\s*")
+
+
+def clean_key(text: str) -> str:
+    """A pasted key without the extras that come with a copy: surrounding and inner
+    whitespace and line breaks, quotes, and a leading label such as "Spotify client
+    ID:". What's left is what gets validated and saved."""
+    t = (text or "").strip()
+    for _ in range(3):                       # "Client ID: Key: abc" and the like
+        m = _LABEL_RE.match(t)
+        if not m or not t[m.end():].strip():
+            break
+        t = t[m.end():]
+    t = "".join(t.split())                   # spaces, tabs, line breaks, anywhere
+    return t.strip("\"'`<>[]{}()")
 
 
 def valid_client_id(v: str) -> bool:
-    return bool(SPOTIFY_ID_RE.fullmatch((v or "").strip()))
+    return bool(SPOTIFY_ID_RE.fullmatch(clean_key(v)))
 
 
 def valid_freqblog(v: str) -> bool:
-    return bool(FREQBLOG_RE.fullmatch((v or "").strip()))
+    return bool(FREQBLOG_RE.fullmatch(clean_key(v)))
 
 
 def valid_getsongbpm(v: str) -> bool:
-    return bool(GETSONGBPM_RE.fullmatch((v or "").strip()))
+    return bool(GETSONGBPM_RE.fullmatch(clean_key(v)))
+
+
+def _bg_thread(fn, done, parent):
+    """Run fn() off the UI thread, then done(result) on it."""
+    class _T(QThread):
+        result = Signal(object)
+
+        def run(self):
+            try:
+                self.result.emit(fn())
+            except Exception as e:                  # never raised into the UI
+                self.result.emit(e)
+    t = _T(parent)
+    t.result.connect(done)
+    t.finished.connect(t.deleteLater)
+    t.start()
+    return t
 
 
 # ---------------- ports ----------------
@@ -129,10 +172,12 @@ def explain_auth_error(e: Exception, uri: str) -> str:
         return (f"The sign-in didn't match. Make sure {uri} is saved as a Redirect URI on your "
                 "Spotify app (exactly, same port), then open the sign-in again and paste the "
                 "new address.")
-    if "state mismatch" in t or "session was lost" in t:
+    if "state mismatch" in t or "state missing" in t or "session was lost" in t:
         return "That address came from an older sign-in. Click Open Spotify sign-in again."
     if "couldn't find a code" in t or "nothing pasted" in t:
         return "Paste the whole address from the browser's address bar, starting with http://127.0.0.1."
+    if "couldn't reach spotify" in t:
+        return str(e)
     return f"Sign-in failed: {e}"
 
 
@@ -172,16 +217,32 @@ def _copy_row(text: str, name: str) -> tuple[QHBoxLayout, QLineEdit, QPushButton
 
 
 class SetupWizard(QDialog):
-    """Seven steps; Next is locked until the step's job is done. finished() data
-    is written only on Finish; Cancel leaves everything as it was."""
+    """Eight steps; Next is locked until the step's job is done. finished() data
+    is written only on Finish; Cancel leaves everything as it was.
+
+    key_check, run_bg and listener_factory are there so tests can stand in for
+    FreqBlog, the background thread and the sign-in listener."""
+
+    _caught = Signal(str)         # the listener's redirect address, carried to the UI thread
 
     def __init__(self, auth, prefs, parent=None, start: int = WELCOME, required: bool = False,
-                 scan=None, verify=spotify_me, open_url=None):
+                 scan=None, verify=spotify_me, open_url=None, key_check=None,
+                 run_bg=None, listener_factory=CallbackListener):
         super().__init__(parent)
         self.auth = auth
         self.prefs = prefs
         self.required = required
         self.verify = verify
+        self.key_check = key_check or (lambda key: check_key(key))
+        self._run_bg = run_bg or (lambda fn, done: _bg_thread(fn, done, self))
+        self._listener_factory = listener_factory
+        self.listener = None
+        self.fb_check = None              # None (not checked) | "ok" | "rejected" | "offline"
+        self.fb_checking = False
+        self._signin_timer = QTimer(self)
+        self._signin_timer.setSingleShot(True)
+        self._signin_timer.timeout.connect(self._signin_timed_out)
+        self._caught.connect(self._on_caught)
         self._open_url = open_url or (lambda url: QDesktopServices.openUrl(QUrl(url)))
         env = load_env()
         self.env_before = dict(_read_env_file(env_path()))
@@ -243,12 +304,15 @@ class SetupWizard(QDialog):
         # when the documents change)
         if i == AGREE and self.agreed() and self.stack.currentIndex() != AGREE:
             i = LOGIN if self.stack.currentIndex() < AGREE else SPOTIFY
+        if i != LOGIN:
+            self.stop_listening()         # leaving the sign-in step: nothing keeps listening
         if i == DONE:
             self._fill_summary()
         self.stack.setCurrentIndex(i)
         self.step_label.setText(f"STEP {i + 1} OF {len(TITLES)}  ·  {TITLES[i].upper()}")
         self.btn_back.setEnabled(i > 0)
         self.btn_next.setText("Finish" if i == DONE else "Next")
+        self.btn_cancel.setVisible(i != DONE)       # the last page has Back and Finish only
         self._refresh_next()
 
     def _refresh_next(self):
@@ -262,7 +326,8 @@ class SetupWizard(QDialog):
         if i == LOGIN:
             return self.login_ok
         if i == FREQBLOG:
-            return valid_freqblog(self.freqblog.text())
+            return (valid_freqblog(self.freqblog.text()) and not self.fb_checking
+                    and self.fb_check != "rejected")
         if i == GETSONGBPM:
             v = self.getsongbpm.text().strip()
             return not v or valid_getsongbpm(v)          # optional: blank is fine
@@ -278,6 +343,9 @@ class SetupWizard(QDialog):
             self.save()
             self.accept()
             return
+        if i == FREQBLOG and self.fb_check is None:
+            self.check_freqblog()     # one /me/stats call; Next again goes on
+            return
         if i == AGREE:
             self.prefs.agreement_version = AGREEMENT_VERSION     # accepted: not asked again
         self.go(i + 1)
@@ -291,8 +359,17 @@ class SetupWizard(QDialog):
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if ans != QMessageBox.Yes:
                 return
+        self.stop_listening()
         self._restore()
         super().reject()
+
+    def accept(self):
+        self.stop_listening()
+        super().accept()
+
+    def closeEvent(self, e):
+        self.stop_listening()
+        super().closeEvent(e)
 
     def _restore(self):
         if not self.saved:
@@ -318,8 +395,8 @@ class SetupWizard(QDialog):
             "<li>a free <b>FreqBlog</b> key, for BPM and key estimates,</li>"
             "<li>optionally, a free <b>GetSongBPM</b> key, a fallback for tracks FreqBlog misses.</li>"
             "</ul>"
-            f"<p style='color:{theme.MUTED}'>Everything stays on this PC. Your keys are yours alone: "
-            "never share or publish them.</p>"))
+            f"<p style='color:{theme.MUTED}'>Your keys and playlists stay on this PC. Your keys are "
+            "yours alone: never share or publish them.</p>"))
         v.addStretch(1)
         return w
 
@@ -396,6 +473,8 @@ class SetupWizard(QDialog):
         self.client_id.textChanged.connect(self._client_changed)
         v.addWidget(self.client_id)
         self.client_note = QLabel("")
+        self.client_note.setObjectName("client_note")
+        self.client_note.setWordWrap(True)
         v.addWidget(self.client_note)
         self._client_changed()
         v.addStretch(1)
@@ -409,14 +488,29 @@ class SetupWizard(QDialog):
         self.login_ok = False          # a different redirect needs a fresh sign-in test
         self._refresh_next()
 
+    def _tidy(self, box: QLineEdit, valid) -> tuple[str, bool]:
+        """Clean a pasted key in place when that makes it valid. Returns (value, tidied)."""
+        raw = box.text()
+        v = clean_key(raw)
+        if v != raw and v and valid(v):
+            box.blockSignals(True)
+            box.setText(v)
+            box.blockSignals(False)
+            return v, True
+        return v, False
+
     def _client_changed(self):
-        v = self.client_id.text().strip()
+        v, tidied = self._tidy(self.client_id, valid_client_id)
         if not v:
             _say(self.client_note, "Paste the Client ID.", None)
         elif valid_client_id(v):
-            _say(self.client_note, "Looks right.", True)
+            _say(self.client_note, "Looks right." + (" (Extra text around it was removed.)"
+                                                     if tidied else ""), True)
         else:
-            _say(self.client_note, "A Spotify Client ID is 32 letters and digits.", False)
+            _say(self.client_note, f"That isn't a Spotify Client ID: it should be 32 letters and "
+                                   f"digits, and this is {len(v)} character(s)"
+                                   + ("" if v.isalnum() else ", with symbols in it")
+                                   + ". Copy it again from the app's settings.", False)
         self.login_ok = False
         if hasattr(self, "btn_next"):
             self._refresh_next()
@@ -455,11 +549,13 @@ class SetupWizard(QDialog):
         v.addWidget(_p(
             "<ol style='margin-left:-18px'>"
             "<li>Click <b>Open Spotify sign-in</b>. Your browser opens Spotify's login.</li>"
-            "<li>Approve. The browser then lands on a page that <b>fails to load</b>. That is "
-            "expected: nothing on this PC listens on that address.</li>"
-            "<li>Copy the whole address from the browser's address bar, paste it below and "
-            "click <b>Check sign-in</b>.</li>"
-            "</ol>"))
+            "<li>Approve. The browser shows <b>\"You can close this tab\"</b> and this step "
+            "finishes by itself.</li>"
+            "</ol>"
+            f"<p style='color:{theme.MUTED}'>While it waits, Playlist Flow listens on "
+            "127.0.0.1 (this PC only) for Spotify's answer, and stops as soon as it arrives. "
+            "If the browser shows an error page instead, copy the whole address from its "
+            "address bar, paste it below and click <b>Check sign-in</b>.</p>"))
         row = QHBoxLayout()
         b = QPushButton("Open Spotify sign-in")
         b.setObjectName("open_signin")
@@ -488,7 +584,7 @@ class SetupWizard(QDialog):
         return w
 
     def _apply_auth(self):
-        self.auth.client_id = self.client_id.text().strip()
+        self.auth.client_id = clean_key(self.client_id.text())
         self.auth.port = self.port() or DEFAULT_REDIRECT_PORT
 
     def _open_signin(self):
@@ -498,19 +594,73 @@ class SetupWizard(QDialog):
         except AuthError as e:
             _say(self.login_msg, explain_auth_error(e, self.auth.redirect_uri), False)
             return
+        self.login_ok = False
+        self._refresh_next()
+        listening = self.start_listening()
         self._open_url(url)
-        _say(self.login_msg, "Browser opened. Paste the address it lands on above.", None)
+        if listening:
+            _say(self.login_msg, "Browser opened. Approve there, and this step finishes by "
+                                 "itself.", None)
+        else:
+            _say(self.login_msg, f"Browser opened. Playlist Flow couldn't listen on port "
+                                 f"{self.auth.port}, so once you approve, paste the address "
+                                 "the browser lands on above and click Check sign-in.", None)
+
+    # automatic sign-in: the listener
+
+    def start_listening(self) -> bool:
+        """Listen for the redirect of the sign-in begin() just started. False when the
+        port can't be bound (the paste box is the fallback)."""
+        self.stop_listening()
+        lst = self._listener_factory(self.auth.port, self._caught.emit)
+        try:
+            ok = lst.start(self.auth._state)
+        except Exception:
+            ok = False
+        if not ok:
+            return False
+        self.listener = lst
+        self._signin_timer.start(SIGNIN_TIMEOUT_MS)
+        return True
+
+    def stop_listening(self):
+        self._signin_timer.stop()
+        lst, self.listener = self.listener, None
+        if lst is not None:
+            try:
+                lst.stop()
+            except Exception:
+                pass
+
+    def _signin_timed_out(self):
+        if self.listener is None:
+            return
+        self.stop_listening()
+        if not self.login_ok:
+            _say(self.login_msg, "Stopped waiting for Spotify. Click Open Spotify sign-in to try "
+                                 "again, or paste the address the browser landed on.", None)
+
+    def _on_caught(self, url: str):
+        if self.listener is None:
+            return                         # stopped meanwhile (cancel, timeout, other step)
+        self.stop_listening()
+        self.finish_signin(url)
 
     def check_signin(self) -> bool:
+        self.stop_listening()
+        return self.finish_signin(self.paste.text())
+
+    def finish_signin(self, address: str) -> bool:
         self._apply_auth()
         self.login_ok = False
         try:
-            self.auth.complete(self.paste.text())
+            self.auth.complete(address)
             ok, msg = self.verify(self.auth.access_token())
         except AuthError as e:
             ok, msg = False, explain_auth_error(e, self.auth.redirect_uri)
         except Exception as e:                       # network, anything: said, never raised
-            ok, msg = False, f"Sign-in failed ({type(e).__name__}). Check your connection and retry."
+            ok, msg = False, (f"Sign-in failed: {e}" if str(e) else
+                              f"Sign-in failed ({type(e).__name__}). Check your connection and retry.")
         self.login_ok = ok
         _say(self.login_msg, msg, ok)
         self._refresh_next()
@@ -521,7 +671,10 @@ class SetupWizard(QDialog):
         self.login_ok = False
         state = self.auth.check()
         if state == "ok":
-            ok, msg = self.verify(self.auth.access_token())
+            try:
+                ok, msg = self.verify(self.auth.access_token())
+            except Exception as e:                   # offline between the two calls
+                ok, msg = False, f"Couldn't finish the check: {e}"
         elif state == "none":
             ok, msg = False, "There is no saved sign-in for this client ID yet. Use Open Spotify sign-in."
         elif state == "dead":
@@ -540,8 +693,9 @@ class SetupWizard(QDialog):
         v = QVBoxLayout(w)
         v.addWidget(_h("FreqBlog key (required)"))
         v.addWidget(_p(
-            "<p>FreqBlog supplies the BPM and musical key estimates. Their free tier is 1,000 "
-            "requests a month, plenty for normal use because looked-up tracks are remembered.</p>"
+            "<p>FreqBlog supplies the BPM and musical key estimates. Their free tier has a "
+            "monthly allowance of requests, plenty for normal use because looked-up tracks are "
+            "remembered and never asked about twice.</p>"
             "<p><b>One free key per person. Never share it.</b></p>"))
         b = QPushButton("Get a free FreqBlog key")
         b.setObjectName("get_freqblog")
@@ -554,25 +708,80 @@ class SetupWizard(QDialog):
         self.freqblog.textChanged.connect(self._freqblog_changed)
         v.addWidget(self.freqblog)
         self.freqblog_note = QLabel("")
+        self.freqblog_note.setObjectName("freqblog_note")
+        self.freqblog_note.setWordWrap(True)
         v.addWidget(self.freqblog_note)
-        v.addWidget(_p(f"<p style='color:{theme.MUTED}'>Only the key's format is checked here, so "
-                       "no request comes out of your allowance. If FreqBlog ever rejects it, "
-                       "Playlist Flow tells you once and brings you back to this step.</p>"))
+        crow = QHBoxLayout()
+        self.btn_fb_check = QPushButton("Check key")
+        self.btn_fb_check.setObjectName("freqblog_check")
+        self.btn_fb_check.clicked.connect(lambda: self.check_freqblog())
+        crow.addWidget(self.btn_fb_check)
+        self.fb_usage = QLabel("")
+        self.fb_usage.setObjectName("freqblog_usage")
+        self.fb_usage.setWordWrap(True)
+        crow.addWidget(self.fb_usage, 1)
+        v.addLayout(crow)
+        v.addWidget(_p(f"<p style='color:{theme.MUTED}'>The check asks FreqBlog about the key "
+                       "itself, which doesn't come out of your allowance. If FreqBlog ever "
+                       "rejects the key later, Playlist Flow tells you once and brings you back "
+                       "to this step.</p>"))
         v.addStretch(1)
         self._freqblog_changed()
         return w
 
     def _freqblog_changed(self):
-        v = self.freqblog.text().strip()
+        v, tidied = self._tidy(self.freqblog, valid_freqblog)
+        self.fb_check = None              # a different key needs its own check
+        if hasattr(self, "fb_usage"):
+            self.fb_usage.setText("")
         if not v:
             _say(self.freqblog_note, "Required.", None)
         elif valid_freqblog(v):
-            _say(self.freqblog_note, "Looks right.", True)
+            _say(self.freqblog_note, "Looks right. Click Check key (or Next) to ask FreqBlog."
+                 + (" Extra text around it was removed." if tidied else ""), None)
         else:
-            _say(self.freqblog_note, "That doesn't look like a FreqBlog key (letters, digits, - "
-                                     "and _, at least 20).", False)
+            _say(self.freqblog_note, f"That doesn't look like a FreqBlog key: it should be 20 or "
+                                     f"more letters, digits, - and _, and this is {len(v)} "
+                                     "character(s)" + ("" if all(c.isalnum() or c in "-_" for c in v)
+                                                       else ", with other symbols in it")
+                                     + ". Copy it again from FreqBlog's email.", False)
         if hasattr(self, "btn_next"):
             self._refresh_next()
+
+    def check_freqblog(self):
+        """One GET /me/stats. ok: key good, usage shown. rejected: FreqBlog's own words,
+        Next stays locked. offline: said plainly, and Next goes on with the format check."""
+        key = clean_key(self.freqblog.text())
+        if not valid_freqblog(key) or self.fb_checking:
+            return
+        self.fb_checking = True
+        self.btn_fb_check.setEnabled(False)
+        _say(self.freqblog_note, "Checking the key with FreqBlog…", None)
+        self.fb_usage.setText("")
+        self._refresh_next()
+        self._run_bg(lambda: self.key_check(key), lambda res: self._freqblog_checked(key, res))
+
+    def _freqblog_checked(self, key: str, res):
+        self.fb_checking = False
+        self.btn_fb_check.setEnabled(True)
+        if clean_key(self.freqblog.text()) != key:
+            self._refresh_next()           # the key was changed while checking: ignore this one
+            return
+        status = getattr(res, "status", "offline")
+        msg = getattr(res, "message", "") or (str(res) if res else "")
+        self.fb_check = status
+        if status == "ok":
+            _say(self.freqblog_note, "FreqBlog accepted the key. Click Next to continue.", True)
+            text, warn = usage_text(res.usage)
+            colour = "#E8B04F" if warn else theme.MUTED
+            self.fb_usage.setText(f"<span style='color:{colour}'>{html_escape(text, quote=False)}</span>")
+        elif status == "rejected":
+            _say(self.freqblog_note, "FreqBlog rejected the key: " + html_escape(msg, quote=False), False)
+        else:
+            self.fb_check = "offline"
+            _say(self.freqblog_note, html_escape(msg or "Couldn't reach FreqBlog.", quote=False) +
+                 " Only the key's format was checked, so you can go on with Next.", None)
+        self._refresh_next()
 
     # ---------------- 5 GetSongBPM ----------------
 
@@ -599,20 +808,26 @@ class SetupWizard(QDialog):
         self.getsongbpm.textChanged.connect(self._getsongbpm_changed)
         v.addWidget(self.getsongbpm)
         self.getsongbpm_note = QLabel("")
+        self.getsongbpm_note.setObjectName("getsongbpm_note")
+        self.getsongbpm_note.setWordWrap(True)
         v.addWidget(self.getsongbpm_note)
         v.addStretch(1)
         self._getsongbpm_changed()
         return w
 
     def _getsongbpm_changed(self):
-        v = self.getsongbpm.text().strip()
+        v, tidied = self._tidy(self.getsongbpm, valid_getsongbpm)
         if not v:
             _say(self.getsongbpm_note, "Optional. Empty means skipped.", None)
         elif valid_getsongbpm(v):
-            _say(self.getsongbpm_note, "Looks right.", True)
+            _say(self.getsongbpm_note, "Looks right." + (" (Extra text around it was removed.)"
+                                                         if tidied else ""), True)
         else:
-            _say(self.getsongbpm_note, "That doesn't look like a GetSongBPM key "
-                                       "(letters and digits, at least 16).", False)
+            _say(self.getsongbpm_note, f"That doesn't look like a GetSongBPM key: it should be 16 "
+                                       f"or more letters and digits, and this is {len(v)} "
+                                       "character(s)" + ("" if v.isalnum() else ", with symbols "
+                                                         "in it") + ". Copy it again, or leave "
+                                       "the box empty to skip.", False)
         if hasattr(self, "btn_next"):
             self._refresh_next()
 
@@ -661,12 +876,15 @@ class SetupWizard(QDialog):
         return w
 
     def _fill_summary(self):
-        gs = "added" if self.getsongbpm.text().strip() else "skipped"
+        gs = "added" if clean_key(self.getsongbpm.text()) else "skipped"
+        fb = {"ok": "saved, accepted by FreqBlog",
+              "offline": "saved (format checked; FreqBlog couldn't be reached)"}.get(
+            self.fb_check, "saved")
         self.summary.setText(
             "<ul>"
             f"<li>Spotify app: client ID saved, redirect {redirect_uri(self.port() or DEFAULT_REDIRECT_PORT)}</li>"
             f"<li>Spotify sign-in: {'working' if self.login_ok else 'not tested'}</li>"
-            "<li>FreqBlog key: saved</li>"
+            f"<li>FreqBlog key: {fb}</li>"
             f"<li>GetSongBPM key: {gs}</li>"
             f"<li>Playlists folder: {self.folder.text().strip()}</li>"
             "</ul>"
@@ -677,10 +895,10 @@ class SetupWizard(QDialog):
 
     def collected(self) -> dict:
         """Exactly what this wizard gathered, as .env entries."""
-        out = {"SPOTIFY_CLIENT_ID": self.client_id.text().strip(),
+        out = {"SPOTIFY_CLIENT_ID": clean_key(self.client_id.text()),
                "SPOTIFY_REDIRECT_PORT": str(self.port() or DEFAULT_REDIRECT_PORT),
-               "FREQBLOG_API_KEY": self.freqblog.text().strip()}
-        gs = self.getsongbpm.text().strip()
+               "FREQBLOG_API_KEY": clean_key(self.freqblog.text())}
+        gs = clean_key(self.getsongbpm.text())
         out["GETSONGBPM_API_KEY"] = gs                # empty removes a skipped key
         return out
 

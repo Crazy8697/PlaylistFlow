@@ -1,6 +1,7 @@
 import sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import nonet  # noqa: F401  (no network in tests)
 """Render every window and dialog to PNG, isolated, for a visual review.
 
     .venv\\Scripts\\python tests\\shotall.py <output folder>
@@ -131,13 +132,36 @@ _name["next"] = "04-release-notes"
 w._show_release_notes()
 w.update_bar.hide()
 
-# Settings, both tabs
-d = SettingsDialog(w, first_run=False, prefs=w.prefs)
+# Settings, both tabs. The FreqBlog usage line comes from a synthetic /me/stats answer.
+from playlistflow import freqcheck as _fc
+from playlistflow.providers import Usage as _Usage
+
+
+def fake_check(key, status="ok", used=412, quota=1000):
+    if status == "ok":
+        return _fc.KeyCheck("ok", "fine", _Usage(used=used, quota=quota, pct=100.0 * used / quota,
+                                                 reset="2026-11-01"))
+    if status == "rejected":
+        return _fc.KeyCheck("rejected", "This key is not active. Check the key in your email, or "
+                                        "request a new one at freqblog.com.")
+    return _fc.KeyCheck("offline", "Couldn't check the key with FreqBlog right now "
+                                   "(Couldn't reach FreqBlog (ConnectionError).).")
+
+
+d = SettingsDialog(w, first_run=False, prefs=w.prefs, key_check=fake_check, fetch_usage=False)
+d.show_usage(fake_check(""))
 tabs = d.findChild(mw.QTabWidget) if hasattr(mw, "QTabWidget") else None
 if tabs is None:
     from PySide6.QtWidgets import QTabWidget
     tabs = d.findChild(QTabWidget)
-save(d, "05-settings-connections", (720, 640))
+save(d, "05-settings-connections", (720, 700))
+d.show_usage(fake_check("", used=930))
+save(d, "05b-settings-usage-warning", (720, 700))
+d.show_usage(fake_check("", status="offline"))
+save(d, "05c-settings-usage-unavailable", (720, 700))
+d.show_usage(fake_check(""))
+d.fields["FREQBLOG_API_KEY"]._test()
+save(d, "05d-settings-freqblog-test", (720, 700))
 tabs.setCurrentIndex(1)
 save(d, "06-settings-display", (720, 640))
 
@@ -179,12 +203,28 @@ ib.exec()
 from playlistflow import wizard as wz
 from playlistflow.auth import SpotifyAuth
 scan = [(8888, True)] + [(p, False) for p in range(8889, 8900)]
+
+
+class _ShotListener:
+    """Stands in for the sign-in listener: nothing is bound for a screenshot."""
+
+    def __init__(self, port, on_url):
+        self.address = ("127.0.0.1", port)
+
+    def start(self, state):
+        return True
+
+    def stop(self):
+        pass
+
+
 wiz = wz.SetupWizard(SpotifyAuth("", w.prefs), w.prefs, w, scan=scan,
                      verify=lambda tok: (True, "Signed in as Synthetic User. Spotify answered."),
-                     open_url=lambda url: None)
+                     open_url=lambda url: None, key_check=fake_check,
+                     run_bg=lambda fn, done: done(fn()), listener_factory=_ShotListener)
 wiz.client_id.setText("0123456789abcdef0123456789abcdef")
 wiz.freqblog.setText("synthetic_freqblog_key_0123456789")
-wiz.resize(760, 620)
+wiz.resize(760, 640)
 w.prefs.agreement_version = ""           # show the agreement step as a first run would
 for i, name in enumerate(("welcome", "spotify-app", "agreement", "sign-in", "freqblog",
                           "getsongbpm", "storage", "done")):
@@ -196,8 +236,36 @@ for i, name in enumerate(("welcome", "spotify-app", "agreement", "sign-in", "fre
         wiz.agree_box.setChecked(True)
         save(wiz, f"{20 + i:02d}-wizard-{i + 1}-{name}-ticked")
         continue
+    if i == wz.SPOTIFY:
+        wiz.go(i)
+        wiz.client_id.setText("Spotify client ID:\n 0123456789abcdef0123456789abcdef \n")
+        save(wiz, f"{20 + i:02d}-wizard-{i + 1}-{name}-paste-cleaned")
+        wiz.client_id.setText("Client ID: 0123456789abcdef01234")
+        save(wiz, f"{20 + i:02d}-wizard-{i + 1}-{name}-paste-wrong")
+        wiz.client_id.setText("0123456789abcdef0123456789abcdef")
+        continue
+    if i == wz.FREQBLOG:
+        wiz.go(i)
+        save(wiz, f"{20 + i:02d}-wizard-{i + 1}-{name}-unchecked")
+        wiz.check_freqblog()
+        save(wiz, f"{20 + i:02d}-wizard-{i + 1}-{name}-usage")
+        for variant, kc in (("usage-warning", lambda k: fake_check(k, used=930)),
+                            ("rejected", lambda k: fake_check(k, status="rejected")),
+                            ("offline", lambda k: fake_check(k, status="offline"))):
+            wiz.key_check = kc
+            wiz.fb_check = None
+            wiz.check_freqblog()
+            save(wiz, f"{20 + i:02d}-wizard-{i + 1}-{name}-{variant}")
+        wiz.key_check = fake_check
+        wiz.fb_check = None
+        wiz.check_freqblog()
+        continue
     if i == wz.LOGIN:
         wiz.go(i)
+        wiz.client_id.setText("0123456789abcdef0123456789abcdef")
+        wiz._open_signin()
+        save(wiz, f"{20 + i:02d}-wizard-{i + 1}-{name}-waiting")
+        wiz.stop_listening()
         wiz.paste.setText("http://127.0.0.1:8889/callback?code=SYNTHETIC&state=SYNTHETIC")
         wiz.login_ok = False
         wz._say(wiz.login_msg, wz.explain_auth_error(

@@ -1,11 +1,12 @@
 """Write the app icon out at every size Windows asks for.
 
-The artwork itself lives in playlistflow/artwork.py, because the About dialog
-uses the same source images and the two must not drift apart.
+The artwork is assets/icon.svg (Funnel A) and, for 16 and 24 px, the thicker
+assets/icon-small.svg; playlistflow/artwork.py renders them, so the window,
+About and the .ico can't drift apart.
 
-The .ico filename carries a version. Windows caches shell icons by path, so
-overwriting the same filename leaves stale icons on existing shortcuts, a new
-name sidesteps the cache entirely.
+Writes assets/icon.ico (the one the .spec embeds in the exe and the installer
+uses), assets/icon.png (256 px, main.py's fallback) and icon_<size>.png for a
+look (gitignored).
 
 Qt's image writer only ever puts ONE image in an .ico. Windows then downscales
 that single 256px frame for the 16px tray and list views, which looks mushy, so
@@ -20,9 +21,6 @@ from PySide6.QtCore import QBuffer, QByteArray
 from PySide6.QtWidgets import QApplication
 
 from playlistflow.artwork import icon_pixmap
-
-# Bumped when the artwork changes, to walk around Windows' shell icon cache.
-ICON_VERSION = 3
 
 SIZES = [16, 24, 32, 48, 64, 128, 256]
 
@@ -78,12 +76,11 @@ def main():
         frames[s] = png_bytes(s)
     icon_pixmap(256).save(str(out / "icon.png"))
 
-    versioned = out / f"icon_v{ICON_VERSION}.ico"
-    write_ico(versioned, frames)
-    write_ico(out / "icon.ico", frames)     # the name the .spec embeds
+    ico = out / "icon.ico"
+    write_ico(ico, frames)                  # the name the .spec embeds
 
     print("sizes:", SIZES)
-    print("wrote:", versioned, f"({versioned.stat().st_size // 1024} KB)")
+    print("wrote:", ico, f"({ico.stat().st_size // 1024} KB)")
 
 
 if __name__ == "__main__":

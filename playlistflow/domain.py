@@ -130,6 +130,26 @@ def felt_bpm(bpm: float) -> float:
     return bpm / 2 if bpm >= FELT_FOLD else bpm
 
 
+def folded(bpm: float) -> bool:
+    """True when felt view shows this BPM halved."""
+    return bpm >= FELT_FOLD
+
+
+def reported_from_felt(felt: float, was_folded: bool) -> float:
+    """The reported BPM to store when a felt-view cell is edited to `felt`.
+
+    Picks the reported value whose felt BPM is what was typed: `felt` itself
+    (shown unhalved) or twice it (shown halved). Both fit between FELT_FOLD/2
+    and FELT_FOLD, and then the row's current state breaks the tie. A typed
+    value at or above the fold cannot be a felt BPM, so it is taken as reported.
+    """
+    if felt <= 0 or felt >= FELT_FOLD:
+        return felt
+    if was_folded and felt * 2 >= FELT_FOLD:
+        return felt * 2
+    return felt
+
+
 def key_gap(a: Track, b: Track) -> float:
     """Distance between two keys on the Camelot wheel.
 

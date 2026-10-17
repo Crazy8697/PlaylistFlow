@@ -11,7 +11,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-AGREEMENT_VERSION = "2026-10-17"
+AGREEMENT_VERSION = "2026-10-17.2"
 
 # file name in the repo -> file name next to the installed exe
 SHIPPED = {"PRIVACY.md": "PRIVACY.md", "TERMS.md": "TERMS.md", "LICENSE": "LICENSE.txt",

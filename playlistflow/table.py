@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QHeaderView, QStyle, QMenu,
 )
 
-from .domain import Track, Seam, felt_bpm, valid_key
+from .domain import Track, Seam, felt_bpm, folded, valid_key
 
 COL_N, COL_TITLE, COL_ARTIST, COL_BPM, COL_KEY = range(5)
 HEADERS = ["#", "Title", "Artist", "BPM", "Key"]
@@ -304,7 +304,7 @@ class TrackTable(QTableWidget):
 
     def _fill_row(self, i: int, t: Track):
         shown = felt_bpm(t.bpm) if self._felt else t.bpm
-        halved = self._felt and t.bpm >= 130
+        halved = self._felt and folded(t.bpm)
 
         def mk(text, editable=False, align=Qt.AlignLeft | Qt.AlignVCenter):
             it = QTableWidgetItem(text)

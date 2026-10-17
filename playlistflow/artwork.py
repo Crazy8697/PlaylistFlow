@@ -1,13 +1,12 @@
 """The app artwork.
 
-Was drawn in code; it is now two supplied illustrations:
-
-    assets/icon_source.png   the icon, flat ground, one heavy curl, notes
+    assets/icon.svg          the icon (Funnel A), the master
+    assets/icon-small.svg    the same design for 16 and 24 px: thicker strokes, no
+                             staff lines, because the master turns to mush that small
     assets/about_source.png  the fuller scene, used behind the About dialog
 
-Both are loaded once and cached. Scaling happens per requested size, because
-Windows asks for everything from 16px to 256px and a smooth downscale of the
-1024px original beats re-decoding the file each time.
+The icon is rendered from the SVG at each requested size (Windows asks for
+everything from 16 to 256 px), so every size is drawn sharp rather than scaled.
 """
 
 from __future__ import annotations
@@ -18,7 +17,9 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QRectF
 from PySide6.QtGui import QImage, QPainter, QPainterPath, QPixmap
 
-ICON_SRC = "icon_source.png"
+ICON_SVG = "icon.svg"
+ICON_SMALL_SVG = "icon-small.svg"
+SMALL_MAX = 24            # this size and below use icon-small.svg
 ABOUT_SRC = "about_source.png"
 
 _cache: dict[str, QImage] = {}
@@ -72,33 +73,30 @@ def _rounded(pm: QPixmap, radius_frac: float) -> QPixmap:
     return out
 
 
-def icon_pixmap(size: int, rounded: bool = False) -> QPixmap:
-    """The icon at `size`, square.
+def icon_image(size: int) -> QImage:
+    """The icon rendered at exactly size x size, transparent outside its rounded tile."""
+    from PySide6.QtSvg import QSvgRenderer
+    img = QImage(size, size, QImage.Format_ARGB32_Premultiplied)
+    img.fill(Qt.transparent)
+    p = asset_path(ICON_SMALL_SVG if size <= SMALL_MAX else ICON_SVG) or asset_path(ICON_SVG)
+    if p is None:
+        return img
+    r = QSvgRenderer(str(p))
+    if r.isValid():
+        painter = QPainter(img)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        r.render(painter)
+        painter.end()
+    return img
 
-    Left square by default: the illustration is full-bleed and composed to the
-    frame, so rounding it crops the ground colour rather than softening a
-    silhouette.
-    """
-    key = ("icon", size, rounded)
-    if key in _scaled:
-        return _scaled[key]
-    img = _image(ICON_SRC)
-    if img.isNull():
-        pm = QPixmap(size, size)
-        pm.fill(Qt.transparent)
-    else:
-        pm = QPixmap.fromImage(
-            img.scaled(size, size, Qt.KeepAspectRatioByExpanding,
-                       Qt.SmoothTransformation))
-        if pm.width() != size or pm.height() != size:
-            # Centre-crop anything the aspect expansion overshot.
-            x = max(0, (pm.width() - size) // 2)
-            y = max(0, (pm.height() - size) // 2)
-            pm = pm.copy(x, y, size, size)
-        if rounded:
-            pm = _rounded(pm, 0.1875)
-    _scaled[key] = pm
-    return pm
+
+def icon_pixmap(size: int, rounded: bool = False) -> QPixmap:
+    """The icon at `size`, square. The SVG already has its rounded tile; `rounded`
+    is kept for older callers and changes nothing."""
+    key = ("icon", size)
+    if key not in _scaled:
+        _scaled[key] = QPixmap.fromImage(icon_image(size))
+    return _scaled[key]
 
 
 def about_pixmap(width: int, height: int) -> QPixmap:

@@ -1,5 +1,7 @@
 import sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import nonet  # noqa: F401  (no network in tests)
 """The privacy policy / end user agreement step, and Settings > Disconnect Spotify.
 
 Isolated: temp APPDATA and profile, a throwaway settings .ini, synthetic playlists in a temp

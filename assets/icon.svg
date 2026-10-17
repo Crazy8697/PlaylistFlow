@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 120 120">
+  <title>Playlist Flow</title>
+  <defs>
+    <clipPath id="win">
+      <rect x="18" y="18" width="84" height="84" rx="16"/>
+    </clipPath>
+  </defs>
+  <rect width="120" height="120" rx="24" fill="#0a0e14"/>
+  <rect x="18" y="18" width="84" height="84" rx="16" fill="#0f2530"/>
+  <g clip-path="url(#win)" stroke="#19C2E6" stroke-width="1.5" opacity="0.25">
+    <line x1="18" y1="44" x2="102" y2="44"/>
+    <line x1="18" y1="52" x2="102" y2="52"/>
+    <line x1="18" y1="60" x2="102" y2="60"/>
+    <line x1="18" y1="68" x2="102" y2="68"/>
+    <line x1="18" y1="76" x2="102" y2="76"/>
+  </g>
+  <rect x="18" y="18" width="84" height="84" rx="16" fill="none" stroke="#19C2E6" stroke-width="4"/>
+  <g stroke="#19C2E6" stroke-width="2.5" fill="none">
+    <line x1="29" y1="35" x2="62" y2="60"/>
+    <line x1="42" y1="54" x2="62" y2="60"/>
+    <line x1="31" y1="83" x2="62" y2="60"/>
+    <line x1="62" y1="60" x2="90" y2="60"/>
+  </g>
+  <circle cx="29" cy="35" r="4" fill="#0E7490" stroke="#19C2E6" stroke-width="2"/>
+  <circle cx="42" cy="54" r="3.5" fill="#0E7490" stroke="#19C2E6" stroke-width="2"/>
+  <circle cx="31" cy="83" r="5" fill="#0E7490" stroke="#19C2E6" stroke-width="2"/>
+  <circle cx="62" cy="60" r="4.5" fill="#0E7490" stroke="#19C2E6" stroke-width="2"/>
+  <circle cx="90" cy="60" r="6.5" fill="#19C2E6"/>
+</svg>

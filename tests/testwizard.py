@@ -1,5 +1,7 @@
 import sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import nonet  # noqa: F401  (no network in tests)
 """The setup wizard: skip logic, ports, step locks, what it saves. No network, no real settings.
 
 Everything is isolated: a temp APPDATA and user profile, a throwaway settings .ini, the

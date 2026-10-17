@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import requests
 
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import Qt, QThread, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QLineEdit,
@@ -29,7 +29,10 @@ from PySide6.QtWidgets import (
 from .config import (load_env, save_env, env_path, REQUIRED,
                      DISPLAY_DEFAULTS, display_settings, redirect_port)
 from .auth import redirect_uri
+from .freqcheck import UNAVAILABLE, check_key, usage_text
 from .providers import UA
+
+WARN = "#E8B04F"
 
 OK = "#5FBF6B"
 BAD = "#E8544F"
@@ -82,7 +85,8 @@ class Field(QWidget):
         lay.addWidget(self.result)
 
     def value(self) -> str:
-        return self.edit.text().strip()
+        from .wizard import clean_key            # the same paste cleanup as the wizard
+        return clean_key(self.edit.text())
 
     def set_value(self, v: str):
         self.edit.setText(v or "")
@@ -110,30 +114,31 @@ class Field(QWidget):
 # ---------------- testers ----------------
 
 def test_freqblog(key: str) -> tuple[bool, str]:
-    r = requests.get("https://api.freqblog.com/lookup",
-                     headers={"x-api-key": key, "User-Agent": UA},
-                     params={"track": "Uptown Funk", "artist": "Mark Ronson",
-                             "wait": 0},
-                     timeout=25)
-    if r.status_code == 401:
-        return False, "Rejected, check the key."
-    if r.status_code == 429:
-        return False, "Rate limited or out of quota for this month."
-    if r.status_code in (200, 202):
-        return True, "Working."
-    return False, f"Unexpected response ({r.status_code})."
+    """GET /me/stats, the same check as the setup wizard's (free: it doesn't count
+    against the monthly allowance). A 401 shows FreqBlog's own explanation."""
+    res = check_key(key)
+    if res.status == "ok":
+        return True, "Working. FreqBlog accepted the key."
+    if res.status == "rejected":
+        return False, f"Rejected: {res.message}"
+    return False, res.message
 
 
 def test_getsongbpm(key: str) -> tuple[bool, str]:
-    r = requests.get("https://api.getsong.co/search/",
-                     params={"api_key": key, "type": "both",
-                             "lookup": "song:Blinding Lights artist:The Weeknd"},
-                     headers={"User-Agent": UA}, timeout=25)
+    try:
+        r = requests.get("https://api.getsong.co/search/",
+                         params={"api_key": key, "type": "both",
+                                 "lookup": "song:Blinding Lights artist:The Weeknd"},
+                         headers={"User-Agent": UA}, timeout=25)
+    except requests.RequestException as e:
+        return False, f"Couldn't reach GetSongBPM ({type(e).__name__})."
     if r.status_code != 200:
         return False, f"Unexpected response ({r.status_code})."
     try:
         j = r.json()
     except ValueError:
+        return False, "Unreadable response, the key is probably not active yet."
+    if not isinstance(j, dict):
         return False, "Unreadable response, the key is probably not active yet."
     search = j.get("search")
     if isinstance(search, dict) and search.get("error"):
@@ -143,12 +148,15 @@ def test_getsongbpm(key: str) -> tuple[bool, str]:
 
 def test_spotify_id(client_id: str) -> tuple[bool, str]:
     """No secret involved, ask the authorize endpoint whether it knows the ID."""
-    r = requests.get("https://accounts.spotify.com/authorize",
-                     params={"client_id": client_id, "response_type": "code",
-                             "redirect_uri": redirect_uri(redirect_port()),
-                             "code_challenge_method": "S256",
-                             "code_challenge": "x" * 43},
-                     allow_redirects=False, timeout=25)
+    try:
+        r = requests.get("https://accounts.spotify.com/authorize",
+                         params={"client_id": client_id, "response_type": "code",
+                                 "redirect_uri": redirect_uri(redirect_port()),
+                                 "code_challenge_method": "S256",
+                                 "code_challenge": "x" * 43},
+                         allow_redirects=False, timeout=25)
+    except requests.RequestException as e:
+        return False, f"Couldn't reach Spotify ({type(e).__name__})."
     body = r.text.lower()
     if "invalid client" in body or "invalid_client" in body:
         return False, "Spotify does not recognise that client ID."
@@ -168,10 +176,30 @@ TOL_ITEMS = [("Tight (±3%)", "tight"),
              ("Loose (±8%)", "loose")]
 
 
+_LIVE = set()       # running usage fetches; unparented so closing Settings never kills one
+
+
+class _UsageFetch(QThread):
+    done = Signal(object)
+
+    def __init__(self, key, check, parent=None):
+        super().__init__(parent)
+        self.key, self.check = key, check
+
+    def run(self):
+        try:
+            self.done.emit(self.check(self.key))
+        except Exception as e:                    # said as "Usage unavailable", never raised
+            self.done.emit(e)
+
+
 class SettingsDialog(QDialog):
-    def __init__(self, parent=None, first_run: bool = False, prefs=None):
+    def __init__(self, parent=None, first_run: bool = False, prefs=None,
+                 key_check=None, fetch_usage=True):
         super().__init__(parent)
         self.prefs = prefs
+        self.key_check = key_check or (lambda key: check_key(key))
+        self._usage_threads = []
         self.first_run = first_run
         self.setWindowTitle("Setup" if first_run else "Settings")
         self.setMinimumWidth(640)
@@ -228,6 +256,11 @@ class SettingsDialog(QDialog):
         lay.addLayout(row)
 
         self._load()
+        # the usage line: fetched now and on Test, never polled
+        fb = self.fields["FREQBLOG_API_KEY"]
+        fb.tester = self._test_freqblog
+        if fetch_usage:
+            self.refresh_usage()
 
     # ---------------- Connections tab ----------------
 
@@ -249,10 +282,19 @@ class SettingsDialog(QDialog):
 
         self.fields["FREQBLOG_API_KEY"] = Field(
             "FreqBlog API key",
-            "BPM and musical key. Free tier is 1000 lookups a month, and "
-            "results are cached forever, so a track only ever costs one.",
+            "BPM and musical key estimates. The free tier has a monthly allowance of "
+            "requests. Values that are found are kept in the playlist folder's cache "
+            "until you delete it, so a found track is looked up once. Tracks FreqBlog "
+            "is still analysing are checked again later, a few times at growing "
+            "intervals, and tracks it doesn't know are asked about again after a week. "
+            "Test (and opening Settings) asks FreqBlog about the key itself, which "
+            "doesn't count against the allowance.",
             "https://freqblog.com",
             required=True, tester=test_freqblog)
+        self.usage = QLabel("")
+        self.usage.setObjectName("freqblog_usage")
+        self.usage.setWordWrap(True)
+        self.fields["FREQBLOG_API_KEY"].layout().insertWidget(2, self.usage)
 
         self.fields["GETSONGBPM_API_KEY"] = Field(
             "GetSongBPM API key",
@@ -395,6 +437,50 @@ class SettingsDialog(QDialog):
         self.d_autosave.setChecked(d["autosave_on"])
         self.d_autosave_s.setValue(d["autosave_s"])
         self.d_autosave_s.setEnabled(d["autosave_on"])
+
+    # ---------------- FreqBlog usage ----------------
+
+    def show_usage(self, res):
+        """Set the usage line from a KeyCheck: the line on success (warning colour at
+        90% or more), "Usage unavailable" on any failure. Never a popup."""
+        usage = getattr(res, "usage", None)
+        if getattr(res, "status", "") != "ok" or usage is None:
+            text, warn = UNAVAILABLE, False
+        else:
+            text, warn = usage_text(usage)
+        self.usage_warn = warn
+        colour = WARN if warn else DIM
+        self.usage.setText(f"<span style='color:{colour};font-size:11px'>{text}</span>")
+
+    def refresh_usage(self):
+        key = self.fields["FREQBLOG_API_KEY"].value()
+        if not key:
+            self.usage.setText("")                # no key: nothing to show
+            return
+        t = _UsageFetch(key, self.key_check)
+        t.done.connect(self.show_usage)
+        t.finished.connect(lambda t=t: _LIVE.discard(t))
+        _LIVE.add(t)
+        self._usage_threads.append(t)
+        t.start()
+
+    def _test_freqblog(self, key: str) -> tuple[bool, str]:
+        """Settings' Test button: one /me/stats call gives both the answer and the usage."""
+        res = self.key_check(key)
+        self.show_usage(res)
+        if getattr(res, "status", "") == "ok":
+            return True, "Working. FreqBlog accepted the key."
+        if getattr(res, "status", "") == "rejected":
+            return False, f"Rejected: {res.message}"
+        return False, getattr(res, "message", "") or "Couldn't reach FreqBlog."
+
+    def done(self, r):
+        for t in self._usage_threads:             # a late answer has nowhere to go
+            try:
+                t.done.disconnect(self.show_usage)
+            except (RuntimeError, TypeError):
+                pass
+        super().done(r)
 
     def _run_setup(self):
         self.run_setup_requested = True

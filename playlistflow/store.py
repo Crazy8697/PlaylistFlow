@@ -21,6 +21,18 @@ from pathlib import Path
 from .domain import Track
 
 CACHE_FILE = "cache.json"
+# Inside cache.json: when a track FreqBlog queued (202) or could not find may be asked
+# about again. Keyed like the cache; never sent anywhere.
+WAIT_KEY = "_lookup_wait"
+# Re-check delays for a queued track, by how many checks it has had. FreqBlog says
+# analysis is usually ready within a minute or so, and every check is a request.
+QUEUED_DELAYS = (120, 600, 3600, 6 * 3600, 86400)
+MISSING_DAYS = 7          # a track found nowhere is asked about again after this
+
+
+class StoreError(RuntimeError):
+    """A playlist file or the folder could not be read or written. The message is
+    plain enough to show as is."""
 
 
 def safe_name(name: str) -> str:
@@ -32,7 +44,11 @@ def safe_name(name: str) -> str:
 class Store:
     def __init__(self, root: str | Path):
         self.root = Path(root)
-        self.root.mkdir(parents=True, exist_ok=True)
+        try:
+            self.root.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            raise StoreError(f"Can't use the playlist folder {self.root}: "
+                             f"{e.strerror or e}. Pick another one in Settings.") from None
         self._cache: dict[str, dict] | None = None
 
     # ---------------- playlists ----------------
@@ -72,8 +88,11 @@ class Store:
             "tracks": [t.to_dict() for t in tracks],
         }
         tmp = target.with_suffix(".tmp")
-        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        tmp.replace(target)
+        try:
+            tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            tmp.replace(target)
+        except OSError as e:
+            raise StoreError(f"Couldn't save '{name}' to {self.root}: {e.strerror or e}.") from None
         return target
 
     def load(self, name: str, prefer_auto: bool = True) -> list[Track]:
@@ -87,11 +106,19 @@ class Store:
                 pick = auto_p if auto_p.exists() else manual_p
         if not pick.exists():
             return []
-        data = json.loads(pick.read_text(encoding="utf-8"))
+        try:
+            data = json.loads(pick.read_text(encoding="utf-8"))
+            if not isinstance(data, dict) or not isinstance(data.get("tracks", []), list):
+                raise ValueError("not a playlist file")
+            tracks = [Track.from_dict(d) for d in data.get("tracks", []) if isinstance(d, dict)]
+        except (OSError, ValueError, TypeError) as e:
+            raise StoreError(f"Couldn't read {pick.name}: it is damaged or not a Playlist Flow "
+                             f"file ({e}). The other save of this playlist, if there is one, "
+                             "is untouched.") from None
         self._last_pid = data.get("spotify_id", "") or ""
         self._last_desc = data.get("description", "") or ""
         self._last_checked = data.get("ear_checked", []) or []
-        return [Track.from_dict(d) for d in data.get("tracks", [])]
+        return tracks
 
     @property
     def last_loaded_checked(self) -> list:
@@ -192,7 +219,9 @@ class Store:
             p = self.root / CACHE_FILE
             try:
                 self._cache = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
-            except (OSError, json.JSONDecodeError):
+            except (OSError, ValueError):
+                self._cache = {}
+            if not isinstance(self._cache, dict):
                 self._cache = {}
         return self._cache
 
@@ -205,12 +234,14 @@ class Store:
         return f"name:{track.artist.strip().lower()}|{track.title.strip().lower()}"
 
     def cache_get(self, track: Track) -> dict | None:
-        return self._load_cache().get(self.cache_key(track))
+        hit = self._load_cache().get(self.cache_key(track))
+        return hit if isinstance(hit, dict) else None
 
     def cache_put(self, track: Track) -> None:
         if not track.resolved:
             return
         c = self._load_cache()
+        self._waits().pop(self.cache_key(track), None)
         c[self.cache_key(track)] = {
             "bpm": track.bpm,
             "key": track.key,
@@ -248,3 +279,48 @@ class Store:
         if hit.get("isrc") and not track.isrc:
             track.isrc = hit["isrc"]
         return track.resolved
+
+    # ---------------- when to ask FreqBlog again ----------------
+
+    def _waits(self) -> dict:
+        c = self._load_cache()
+        w = c.get(WAIT_KEY)
+        if not isinstance(w, dict):
+            w = c[WAIT_KEY] = {}
+        return w
+
+    def lookup_due(self, track: Track, now: float | None = None) -> bool:
+        """False while a queued or missing track is still inside its wait."""
+        w = self._waits().get(self.cache_key(track))
+        if not isinstance(w, dict):
+            return True
+        return (time.time() if now is None else now) >= float(w.get("next") or 0)
+
+    def waiting(self, track: Track) -> dict | None:
+        w = self._waits().get(self.cache_key(track))
+        return w if isinstance(w, dict) else None
+
+    def mark_waiting(self, track: Track, kind: str, retry_after_days: float | None = None,
+                     now: float | None = None) -> float:
+        """Record that FreqBlog queued ("queued") or could not find ("missing") the
+        track, and when it may be asked again: retry_after_days when FreqBlog gave
+        one, else a growing delay for queued tracks and MISSING_DAYS for missing
+        ones. Returns that time."""
+        now = time.time() if now is None else now
+        waits = self._waits()
+        key = self.cache_key(track)
+        prev = waits.get(key) if isinstance(waits.get(key), dict) else {}
+        checks = int(prev.get("checks", 0)) + 1 if prev.get("kind") == kind else 1
+        if retry_after_days:
+            delay = float(retry_after_days) * 86400
+        elif kind == "queued":
+            delay = QUEUED_DELAYS[min(checks - 1, len(QUEUED_DELAYS) - 1)]
+        else:
+            delay = MISSING_DAYS * 86400
+        waits[key] = {"kind": kind, "checks": checks, "next": now + delay}
+        self.flush_cache()
+        return now + delay
+
+    def clear_waiting(self, track: Track) -> None:
+        if self._waits().pop(self.cache_key(track), None) is not None:
+            self.flush_cache()

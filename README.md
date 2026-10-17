@@ -9,7 +9,7 @@
 Loads a Spotify playlist, fills in BPM and Camelot key, shows you where the
 seams between tracks will fight you, and pushes the reordered playlist back.
 
-A native Windows program. No browser, no webview, no local web server.
+A native Windows program. No browser, no webview, no server of its own.
 
 </div>
 
@@ -84,8 +84,12 @@ There is no client secret to copy. The program signs in with PKCE.
 2. Request your own free key. No card needed
 3. The key arrives by email
 
-The free tier is 1000 requests a month. A value that resolves is cached, so a
-track that has been looked up costs nothing the next time you load the playlist.
+The free tier has a monthly allowance of requests (setup and Settings show how
+much of it is used). Playlist Flow sends playlists through FreqBlog's bulk
+lookup, 50 tracks a call. A value that resolves is cached, so a track that has
+been looked up costs nothing the next time you load the playlist. A track FreqBlog
+is still analysing is checked again a few minutes later, not polled, and one it
+doesn't know is asked about again after a week.
 
 ### 3. GetSongBPM (optional)
 
@@ -192,30 +196,25 @@ immediately and still gives you one exe to make a shortcut to.
 
 ## First run
 
-Until both required keys (the Spotify client ID and the FreqBlog key) are set,
-the program opens the setup dialog every time it starts. Skipping it lets you
-look around, but nothing loads or fetches until the keys are in.
+The first launch opens a setup wizard, one step at a time:
 
-1. Paste the **Spotify client ID** and the **FreqBlog key**. The GetSongBPM key
-   can be left blank
-2. Hit **Test** next to each. It checks the key against the real service, so a
-   typo surfaces now rather than as a confusing error mid-fetch
-3. Pick a folder for saved playlists
-4. **Finish setup**
+1. **Welcome**, and what you'll need
+2. **Spotify app**: the redirect URI to add (on a free port it picks for you)
+   and the box for your client ID. A paste with extra text around it, such as
+   a "Client ID:" label or line breaks, is cleaned up
+3. **Privacy and terms**: read and accept both
+4. **Sign in**: click **Open Spotify sign-in** and approve in your browser. While
+   it waits, the program listens on 127.0.0.1 (this PC only) for Spotify's answer,
+   the browser says you can close the tab, and the step finishes by itself. The
+   listener stops right after. If the port can't be used, paste the address the
+   browser lands on instead
+5. **FreqBlog key**: **Check key** asks FreqBlog about the key (free, it doesn't
+   count against the allowance) and shows how much of this month's allowance is used
+6. **GetSongBPM key**, optional
+7. **Storage folder** for saved playlists
+8. **Done**, then **Finish**
 
-Then sign in: paste a playlist URL and hit **Load playlist**, or use **File →
-Sign in to Spotify…**
-
-Signing in is a one-time, slightly odd dance, because the program deliberately
-opens no network ports:
-
-1. Click **Open Spotify**, and your browser opens Spotify's login
-2. Approve
-3. The browser lands on a page that **fails to load**. That is expected and
-   correct, since nothing is listening on that address
-4. Copy the whole URL out of the address bar and paste it back into the program
-
-Change any of this later under **File → Settings…**
+Run it again any time from **File → Settings… → Run setup again**.
 
 ---
 
@@ -381,7 +380,8 @@ Your account isn't on the app's allowlist. Dashboard → your app → **User
 Management** → add your name and the email on your Spotify account.
 
 **Sign-in page fails to load after approving**
-That's correct. Copy the URL out of the address bar and paste it into the program.
+The program couldn't listen on the redirect port (or the wait timed out). Copy the
+URL out of the address bar and paste it into the sign-in step.
 
 **"No active Spotify device"**
 Open Spotify and play something for a second, so it registers as a device.
@@ -394,8 +394,8 @@ It does.
 Click the cell and type in whatever's right. Typed values are permanent.
 
 **Everything comes back "not found"**
-Check the FreqBlog key under **File → Settings** and hit **Test**. If it says
-rate limited, you're out of monthly quota.
+Check the FreqBlog key under **File → Settings** and hit **Test**. The usage line
+next to the key shows how much of this month's allowance is used, and when it resets.
 
 ---
 
