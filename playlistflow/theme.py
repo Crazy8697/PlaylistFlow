@@ -69,23 +69,23 @@ QPushButton#transport:hover {{ background: {TEAL}; border-color: {ACCENT}; }}
 
 /* toolbars: grouped, with a small-caps label and a dotted grip, icons over labels */
 QToolBar {{ background: {PANEL}; border: none; border-bottom: 1px solid {BORDER}; spacing: 2px; padding: 3px 4px; }}
-QToolBar#tools {{ border-right: 1px solid {BORDER}; }}
-QToolBar#tools::handle:horizontal {{
+QToolBar[group="tools"] {{ border-right: 1px solid {BORDER}; }}
+QToolBar[group="tools"]::handle:horizontal {{
     width: 6px; margin: 8px 2px 8px 3px;
     border-left: 2px dotted {DIM}; border-right: 2px dotted {DIM};
 }}
-QToolBar#tools::handle:horizontal:hover {{ border-color: {ACCENT}; }}
-QToolBar#tools::handle:vertical {{
+QToolBar[group="tools"]::handle:horizontal:hover {{ border-color: {ACCENT}; }}
+QToolBar[group="tools"]::handle:vertical {{
     height: 6px; margin: 3px 8px 2px 8px;
     border-top: 2px dotted {DIM}; border-bottom: 2px dotted {DIM};
 }}
-QToolBar#tools QToolButton {{
+QToolBar[group="tools"] QToolButton {{
     background: transparent; border: 1px solid transparent; border-radius: 6px;
     color: {TEXT}; padding: 2px 4px; margin: 0 1px; font-size: 11px; min-width: 52px;
 }}
-QToolBar#tools QToolButton:hover {{ background: {RAISED}; border-color: {BORDER_HI}; }}
-QToolBar#tools QToolButton:pressed {{ background: {TEAL_LO}; }}
-QToolBar#tools QToolButton:checked {{ background: {ACCENT}; border-color: {ACCENT}; color: {ACCENT_INK}; font-weight: 600; }}
+QToolBar[group="tools"] QToolButton:hover {{ background: {RAISED}; border-color: {BORDER_HI}; }}
+QToolBar[group="tools"] QToolButton:pressed {{ background: {TEAL_LO}; }}
+QToolBar[group="tools"] QToolButton:checked {{ background: {ACCENT}; border-color: {ACCENT}; color: {ACCENT_INK}; font-weight: 600; }}
 QLabel#grouplabel {{ background: transparent; color: {MUTED}; font-size: 9px; font-weight: 700; letter-spacing: 1px; padding: 0 3px; }}
 
 /* side panel: boxed sections */

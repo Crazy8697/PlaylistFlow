@@ -81,6 +81,20 @@ class ProviderError(RuntimeError):
     pass
 
 
+REFUSED_TEXT = ("Spotify refused the track list. In Development Mode only the "
+                "playlist's creator or a collaborator can read its items, and "
+                "your account must be listed under Users and Access in the "
+                "Spotify developer dashboard.")
+
+
+class PlaylistRefused(ProviderError):
+    """403 on a playlist's items: Development Mode serves them only to the playlist's
+    creator or a collaborator."""
+
+    def __init__(self, msg: str = REFUSED_TEXT):
+        super().__init__(msg)
+
+
 def read_json(r, who: str = "The server", want=dict):
     """r.json(), but a reply that is not JSON (or not the expected shape) raises
     ProviderError with a plain message instead of a parser traceback."""
@@ -126,6 +140,7 @@ class SpotifyPlaylist:
     count: int
     owner: str
     mine: bool
+    collaborative: bool = False
 
 
 class _SpotifySession(requests.Session):
@@ -221,7 +236,10 @@ class Spotify:
                     name=it.get("name", "") or "(untitled)",
                     count=counts.get("total") or 0,
                     owner=owner,
-                    mine=bool(mine) and owner == mine,
+                    # if /me couldn't be read, ownership is unknown: treated as the
+                    # user's, so nothing is filed as refused on a guess
+                    mine=(owner == mine) if mine else True,
+                    collaborative=bool(it.get("collaborative")),
                 ))
             url = j.get("next")
             params = None
@@ -358,15 +376,22 @@ class Spotify:
         return r
 
     def play(self, uris: list[str] | None = None, position_ms: int = 0,
-             device_id: str = ""):
+             device_id: str = "", start_uri: str = ""):
         """Start playback. Passing a list of URIs replaces the queue, so the
-        app's working order can be auditioned before it is pushed."""
+        app's working order can be auditioned before it is pushed.
+
+        start_uri goes out as offset {"uri": ...}: the track to start on. Without an
+        offset, a device with shuffle on starts a uris list on a random track, which is
+        what made a double-click play the wrong song."""
         body: dict = {}
         if uris:
             body["uris"] = uris[:200]
             body["position_ms"] = max(0, int(position_ms))
+            if start_uri:
+                body["offset"] = {"uri": start_uri}
         params = {"device_id": device_id} if device_id else None
         self._player_call("PUT", "play", json=body or None, params=params)
+        return body
 
     def resume(self, device_id: str = ""):
         params = {"device_id": device_id} if device_id else None
@@ -548,6 +573,25 @@ class Spotify:
                 progress(moves, i + 1, len(target))
         return moves
 
+    def can_read_items(self, pid: str):
+        """One small request (a single item, one field): True when Spotify serves this
+        playlist's items to this user, False when it refuses (403), None when it can't
+        tell (offline, other errors)."""
+        try:
+            r = self._s.get(
+                f"{SPOTIFY_API}/playlists/{pid}/items",
+                headers={"Authorization": f"Bearer {self._auth()}"},
+                params={"limit": 1, "fields": "items(item(uri))"},
+                timeout=15,
+            )
+        except Exception:
+            return None
+        if r.status_code == 200:
+            return True
+        if r.status_code == 403:
+            return False
+        return None
+
     def playlist_tracks(self, pid: str, progress=None) -> list[SpotifyTrack]:
         """Paginated, Spotify caps a page at 100."""
         out: list[SpotifyTrack] = []
@@ -566,12 +610,7 @@ class Spotify:
             if r.status_code == 401:
                 raise ProviderError("Spotify sign-in expired, sign in again.")
             if r.status_code == 403:
-                raise ProviderError(
-                    "Spotify refused the track list. In Development Mode only the "
-                    "playlist's creator or a collaborator can read its items, and "
-                    "your account must be listed under Users and Access in the "
-                    "Spotify developer dashboard."
-                )
+                raise PlaylistRefused()
             if r.status_code == 404:
                 raise ProviderError("Playlist not found.")
             if r.status_code != 200:

@@ -171,6 +171,16 @@ def set_link_target(lab: QLabel, kind: str, sid: str, installed: bool | None = N
     installed = spotify_installed() if installed is None else installed
     target = spotify_target(kind, sid, installed)
     lab.setProperty("target", target)
+    text = link_text(installed)
     lab.setText(f"<a href='{target}' style='color:#ffffff;text-decoration:none;"
-                f"font-weight:700;font-size:11px;letter-spacing:1px'>{link_text(installed)}</a>")
+                f"font-weight:700;font-size:11px;letter-spacing:1px'>{text}</a>")
+    # A rich-text label reports a minimum of a letter or so, which let a narrow window
+    # crush the link (and crowd the logo's clear space): its real width is the minimum.
+    from PySide6.QtGui import QFont, QFontMetrics
+    f = QFont(lab.font())
+    f.setPixelSize(11)
+    f.setBold(True)
+    f.setLetterSpacing(QFont.AbsoluteSpacing, 1)
+    lab.setMinimumWidth(QFontMetrics(f).horizontalAdvance(text) + 8)
+    lab.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
     lab.setVisible(True)

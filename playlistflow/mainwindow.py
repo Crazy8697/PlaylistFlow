@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 from .domain import (Track, seams, summary, valid_key, felt_bpm, folded, reported_from_felt,
                      seam_key, set_display)
 from .providers import (Spotify, FreqBlog, GetSongBPM, ProviderError, Features, KeyRejected,
-                        AllowanceUsed)
+                        AllowanceUsed, PlaylistRefused, REFUSED_TEXT)
 from .auth import SpotifyAuth, AuthError
 from .keys import clean_title, primary_artist
 from .store import Store, StoreError
@@ -43,7 +43,14 @@ from .updater import (UpdateChecker, UpdateDownloader, can_install, launch_setup
                       RELEASES_URL, UPDATE_STARTUP_DELAY_MS)
 from .finderdialog import FinderDialog
 
+import logging
+
+# Debug log, off unless PLAYLISTFLOW_DEBUG is set (main.py): one line per play request.
+log = logging.getLogger("playlistflow")
+
 UNDO_CAP = 40
+# Bumped when the toolbar groups change, so a layout saved for other groups is ignored.
+TOOLBAR_STATE_VERSION = 1
 # A queued track's re-check runs by itself only when it is due this soon; later ones
 # wait for the next Fetch BPM/key (or the next time the playlist is opened).
 AUTO_RECHECK_MAX_S = 15 * 60
@@ -811,6 +818,28 @@ class MainWindow(QMainWindow):
         self.sp_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.sp_list.customContextMenuRequested.connect(self._sp_list_menu)
         spl.addWidget(self.sp_list, 1)
+        # Playlists Spotify won't serve to a Development Mode app: someone else's (not
+        # collaborative) straight away, from the list's owner field, and any other that
+        # Spotify refuses this session. Nothing is remembered between launches.
+        self.refused_head = QLabel("REFUSED BY SPOTIFY")
+        self.refused_head.setObjectName("refused_head")
+        self.refused_head.setStyleSheet(f"color:{theme.MUTED};font-size:10px;font-weight:700;"
+                                        "letter-spacing:1px;background:transparent;"
+                                        "padding:4px 0 0 2px;")
+        self.refused_head.setToolTip("Spotify only lets a Development Mode app read the items "
+                                     "of playlists you created or collaborate on.")
+        spl.addWidget(self.refused_head)
+        self.refused_list = QListWidget()
+        self.refused_list.setObjectName("refused_list")
+        self.refused_list.setMaximumHeight(110)
+        self.refused_list.itemClicked.connect(self._explain_refused)
+        self.refused_list.itemDoubleClicked.connect(self._explain_refused)
+        spl.addWidget(self.refused_list)
+        self.refused_head.setVisible(False)
+        self.refused_list.setVisible(False)
+        self._sp_lists = []               # the last playlist list read from Spotify
+        self._refused_ids: set = set()    # refused this session (owned or collaborative)
+        self._refusal_shown: set = set()  # popup already shown for these, this session
         sl.addWidget(sp_box, 1)
 
         saved_box = QGroupBox("SAVED PLAYLISTS")
@@ -989,7 +1018,9 @@ class MainWindow(QMainWindow):
 
         def group(title: str) -> QToolBar:
             bar = QToolBar(title.title(), self)
-            bar.setObjectName("tools")
+            # a name per group: saveState()/restoreState() find each group by it
+            bar.setObjectName(f"tools_{title.lower()}")
+            bar.setProperty("group", "tools")
             bar.setMovable(True)
             bar.setFloatable(False)
             bar.setAllowedAreas(Qt.TopToolBarArea)
@@ -1129,6 +1160,13 @@ class MainWindow(QMainWindow):
             # are discoverable rather than folklore.
             a.setShortcutContext(Qt.WidgetShortcut)
             e.addAction(a)
+
+        e.addSeparator()
+        a = QAction("Reset toolbar layout", self)
+        a.setObjectName("reset_toolbars")
+        a.setToolTip("Put the VIEW, SORT, DATA and PLAYLIST groups back where they started")
+        a.triggered.connect(lambda: self.reset_toolbars())
+        e.addAction(a)
 
         h = self.menuBar().addMenu("&Help")
         a = QAction("Check for &updates…", self)
@@ -1706,26 +1744,79 @@ class MainWindow(QMainWindow):
             except ProviderError as e:
                 self.status(str(e))
                 return
+            self._recheck_refused(lists)
             self._fill_spotify_list(lists)
         finally:
             self._refreshing_spotify = False
             self.busy_off()
 
+    @staticmethod
+    def refused_up_front(pl) -> bool:
+        """Someone else's playlist that isn't collaborative: Development Mode won't serve
+        its items, so it is known from the list itself, with no request."""
+        return not pl.mine and not getattr(pl, "collaborative", False)
+
     def _fill_spotify_list(self, lists):
+        self._sp_lists = list(lists)
         self.sp_list.clear()
+        self.refused_list.clear()
+        refused = 0
         for pl in lists:
             it = QListWidgetItem(f"{pl.name}  ({pl.count})")
             it.setData(Qt.UserRole, pl.id)
-            if not pl.mine:
-                # Development Mode only serves items for playlists you created
-                # or collaborate on, so someone else's list will refuse to load.
-                it.setForeground(Qt.gray)
-                it.setToolTip(
-                    f"Owned by {pl.owner}, Spotify will refuse to send its "
-                    f"tracks to a Development Mode app."
-                )
-            self.sp_list.addItem(it)
-        self.status(f"{len(lists)} playlists on your account.")
+            if self.refused_up_front(pl) or pl.id in self._refused_ids:
+                it.setToolTip("Spotify refuses this playlist's tracks to a Development Mode "
+                              "app. Click for why.")
+                self.refused_list.addItem(it)
+                refused += 1
+            else:
+                if not pl.mine:
+                    it.setToolTip(f"Collaborative playlist owned by {pl.owner}.")
+                self.sp_list.addItem(it)
+        self.refused_head.setVisible(bool(refused))
+        self.refused_list.setVisible(bool(refused))
+        self.status(f"{len(lists)} playlists on your account"
+                    + (f", {refused} refused by Spotify." if refused else "."))
+
+    def _explain_refused(self, it):
+        """A playlist in the refused section: the explanation, as a popup once per
+        playlist per session, after that in the status bar. Never a request."""
+        pid = it.data(Qt.UserRole) if it is not None else ""
+        self._refusal_popup(pid)
+
+    def _refusal_popup(self, pid: str):
+        if pid in self._refusal_shown:
+            self.status(REFUSED_TEXT)
+            return
+        self._refusal_shown.add(pid)
+        QMessageBox.warning(self, "Spotify", REFUSED_TEXT)
+
+    def _mark_refused(self, pid: str):
+        """Spotify refused this playlist's items just now: into the refused section (for
+        this session) and the explanation, once."""
+        if pid not in self._refused_ids:
+            self._refused_ids.add(pid)
+            if self._sp_lists:
+                self._fill_spotify_list(self._sp_lists)
+        self._refusal_popup(pid)
+
+    def _mark_readable(self, pid: str):
+        if pid in self._refused_ids:
+            self._refused_ids.discard(pid)
+            if self._sp_lists:
+                self._fill_spotify_list(self._sp_lists)
+
+    def _recheck_refused(self, lists) -> int:
+        """Before the list is shown again: each playlist Spotify refused this session that
+        is owned or collaborative gets one small request; if Spotify serves it now, it
+        goes back to the normal list. Returns the requests made."""
+        made = 0
+        for pl in lists:
+            if pl.id in self._refused_ids and not self.refused_up_front(pl):
+                made += 1
+                if self.spotify.can_read_items(pl.id) is True:
+                    self._refused_ids.discard(pl.id)
+        return made
 
     def _sp_list_menu(self, pos):
         it = self.sp_list.itemAt(pos)
@@ -1751,7 +1842,12 @@ class MainWindow(QMainWindow):
         if not it:
             self.status("Pick a playlist first.")
             return
-        self._load_pid(it.data(Qt.UserRole))
+        pid = it.data(Qt.UserRole)
+        pl = next((p for p in self._sp_lists if p.id == pid), None)
+        if pid in self._refused_ids or (pl is not None and self.refused_up_front(pl)):
+            self._refusal_popup(pid)          # known refused: no request
+            return
+        self._load_pid(pid)
 
     def sync_playlist(self):
         """Re-read the playlist from Spotify without losing local work.
@@ -1776,14 +1872,21 @@ class MainWindow(QMainWindow):
                 return
             try:
                 rows = self.spotify.playlist_tracks(self.current_pid)
+            except PlaylistRefused:
+                self._mark_refused(self.current_pid)
+                return
             except (ProviderError, AuthError) as e:
                 QMessageBox.warning(self, "Sync", str(e))
                 return
+        except PlaylistRefused:
+            self._mark_refused(self.current_pid)
+            return
         except ProviderError as e:
             QMessageBox.warning(self, "Sync", str(e))
             return
         finally:
             self.busy_off()
+        self._mark_readable(self.current_pid)
 
         remote = {r.uri: r for r in rows if r.uri}
         here = {t.uri for t in self.tracks if t.uri}
@@ -1841,16 +1944,23 @@ class MainWindow(QMainWindow):
                 try:
                     name = self.spotify.playlist_name(pid)
                     rows = self.spotify.playlist_tracks(pid)
+                except PlaylistRefused:
+                    self._mark_refused(pid)
+                    return
                 except (ProviderError, AuthError) as e:
                     QMessageBox.warning(self, "Spotify", str(e))
                     self.status(str(e))
                     return
+            except PlaylistRefused:
+                self._mark_refused(pid)
+                return
             except ProviderError as e:
                 QMessageBox.warning(self, "Spotify", str(e))
                 self.status(str(e))
                 return
         finally:
             self.busy_off()
+        self._mark_readable(pid)
         self.snapshot()
         self.tracks = []
         for r in rows:
@@ -2000,7 +2110,7 @@ class MainWindow(QMainWindow):
             return False
         self._poll.stop()
         self.auth.forget()                       # refresh token out of HKCU, tokens out of memory
-        self.sp_list.clear()                     # the user's playlist list from Spotify
+        self._clear_spotify_lists()              # the user's playlist list from Spotify
         self._last_player_state = None
         self.player.set_offline("Not connected to Spotify")   # drops the now-playing art too
         deleted = []
@@ -2019,9 +2129,17 @@ class MainWindow(QMainWindow):
                                                     if deleted else ""))
         return True
 
+    def _clear_spotify_lists(self):
+        self.sp_list.clear()
+        self.refused_list.clear()
+        self.refused_head.setVisible(False)
+        self.refused_list.setVisible(False)
+        self._sp_lists = []
+        self._refused_ids.clear()
+
     def sign_out(self):
         self.auth.forget()
-        self.sp_list.clear()
+        self._clear_spotify_lists()
         self.status("Signed out of Spotify.")
 
     def reanalyze(self):
@@ -2481,14 +2599,37 @@ class MainWindow(QMainWindow):
             rows = sorted({i.row() for i in self.table.selectedIndexes()})
             self.play_from(rows[0] if rows else 0)
 
-    def play_from(self, row: int):
-        """Play from this row onward, in the order shown here, which may not
-        be the order on Spotify yet."""
+    def play_request(self, row: int, position_ms: int = 0) -> tuple | None:
+        """What to send Spotify to play the track on this row: the window's tracks from
+        this row onward (so the order shown here is what follows, pushed or not), starting
+        exactly on this row's track (offset by its uri, which is the first entry, so a
+        duplicate elsewhere in the list can't be picked instead)."""
+        if not (0 <= row < len(self.tracks)) or not self.tracks[row].uri:
+            return None
         uris = [t.uri for t in self.tracks[row:] if t.uri]
-        if not uris:
+        return (uris, position_ms, "", uris[0])
+
+    def _log_play(self, kind: str, req: tuple):
+        uris, position_ms, device, start = req
+        shuffle = "unknown"
+        st = self._last_player_state or {}
+        if st:
+            shuffle = ("smart" if st.get("smart_shuffle") else
+                       "on" if st.get("shuffle_state") else "off")
+        log.debug("play: %s request=uris+offset_uri tracks=%d offset=uri(list index %d) "
+                  "position_ms=%d device=%s shuffle_last_seen=%s", kind, len(uris),
+                  uris.index(start) if start in uris else -1, position_ms,
+                  "given" if device else "active", shuffle)
+
+    def play_from(self, row: int):
+        """Play this row's track, then the rest in the order shown here, which may not
+        be the order on Spotify yet."""
+        req = self.play_request(row)
+        if req is None:
             self.status("That track has no Spotify link.")
             return
-        self._player_do("play", (uris, 0, ""))
+        self._log_play("track", req)
+        self._player_do("play", req)
         t = self.tracks[row]
         self.status(f"Playing '{t.title}' and onward in this order.")
 
@@ -2512,14 +2653,17 @@ class MainWindow(QMainWindow):
         # The context handed to Spotify is the seam PLUS the rest of the set.
         # A bare two-track list became Spotify's entire queue, and with repeat
         # enabled in the client it cycled those two forever.
-        rest = [t.uri for t in self.tracks[i:] if t.uri]
         if a.duration_ms <= 0:
             # Manually added rows have no duration; start at the incoming one.
-            self._player_do("play", (rest[1:], 0, ""))
+            req = self.play_request(i + 1)
+            self._log_play("preview", req)
+            self._player_do("play", req)
             self.status(f"No length known for '{a.title}', playing '{b.title}'.")
             return
         start = max(0, a.duration_ms - tail_s * 1000)
-        self._player_do("play", (rest, start, ""))
+        req = self.play_request(i, start)
+        self._log_play("preview", req)
+        self._player_do("play", req)
         sm = seams(self.tracks, self.approved)
         s = sm[i] if i < len(sm) else None
         detail = f"  ({s.key.txt}, {s.tempo.txt})" if s and s.known else ""
@@ -2750,6 +2894,9 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(last, 12000)
 
     def _restore_layout(self):
+        # the layout as built, before anything saved is applied: what Reset goes back to
+        self._default_toolbars = self.saveState(TOOLBAR_STATE_VERSION)
+        self.restore_toolbars(self.prefs.toolbar_state)
         g = self.prefs.geometry
         if g:
             self.restoreGeometry(g)
@@ -2758,7 +2905,35 @@ class MainWindow(QMainWindow):
             if st:
                 sp.restoreState(st)
 
+    def restore_toolbars(self, state) -> bool:
+        """Put the toolbar groups where they were. A missing, damaged or older saved
+        layout (or one missing a group) leaves the default layout, silently."""
+        ok = False
+        try:
+            if state is not None and len(state):
+                ok = bool(self.restoreState(state, TOOLBAR_STATE_VERSION))
+        except Exception:
+            ok = False
+        if not ok:
+            self.reset_toolbars(save=False)
+        for b in self.tool_groups:            # a restored state never hides a group
+            b.setVisible(True)
+        return ok
+
+    def reset_toolbars(self, save: bool = True):
+        """Edit > Reset toolbar layout: every group back in its default order and place,
+        on one row, at once."""
+        default = getattr(self, "_default_toolbars", None)
+        if default is not None:
+            self.restoreState(default, TOOLBAR_STATE_VERSION)
+        for b in self.tool_groups:
+            b.setVisible(True)
+        if save:
+            self.prefs.toolbar_state = self.saveState(TOOLBAR_STATE_VERSION)
+            self.status("Toolbar layout reset.")
+
     def _save_layout(self):
+        self.prefs.toolbar_state = self.saveState(TOOLBAR_STATE_VERSION)
         self.prefs.geometry = self.saveGeometry()
         self.prefs.set_splitter("h", self.hsplit.saveState())
         self.prefs.set_splitter("v", self.vsplit.saveState())

@@ -44,7 +44,24 @@ def setup_app(app: QApplication) -> None:
     app.setWindowIcon(app_icon())
 
 
+def setup_debug_log() -> None:
+    """PLAYLISTFLOW_DEBUG=1: debug lines (play requests, no tokens, ids or names) go to
+    %LOCALAPPDATA%\\PlaylistFlow\\debug.log. Off otherwise."""
+    import logging
+    import os
+    if not os.environ.get("PLAYLISTFLOW_DEBUG"):
+        return
+    folder = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "PlaylistFlow"
+    folder.mkdir(parents=True, exist_ok=True)
+    h = logging.FileHandler(folder / "debug.log", encoding="utf-8")
+    h.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+    lg = logging.getLogger("playlistflow")
+    lg.addHandler(h)
+    lg.setLevel(logging.DEBUG)
+
+
 def main() -> int:
+    setup_debug_log()
     app = QApplication(sys.argv)
     setup_app(app)
 

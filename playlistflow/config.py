@@ -241,6 +241,15 @@ class Prefs:
     def geometry(self, v):
         self._s.setValue("geometry", v)
 
+    # Where the toolbar groups were dragged: QMainWindow.saveState() bytes.
+    @property
+    def toolbar_state(self):
+        return self._s.value("toolbar_state")
+
+    @toolbar_state.setter
+    def toolbar_state(self, v):
+        self._s.setValue("toolbar_state", v)
+
     # Splitter layouts, saved as QSplitter.saveState() blobs.
     def splitter(self, name: str):
         return self._s.value(f"splitter_{name}")

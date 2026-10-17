@@ -11,3 +11,4 @@ tests/teststage8.py -export-ignore
 tests/nonet.py -export-ignore
 tests/teststage9.py -export-ignore
 tests/teststage10.py -export-ignore
+tests/testpatch101.py -export-ignore

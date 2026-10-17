@@ -301,6 +301,35 @@ mw.DocDialog("TERMS.md", w).exec()
 _name["next"] = "43-disconnect-spotify"
 mw.DisconnectDialog(w.prefs.storage_dir, w).exec()
 
+# ---- 1.0.1: the "Refused by Spotify" section, and a moved toolbar after a restart ----
+from playlistflow.providers import SpotifyPlaylist as _SP
+w._fill_spotify_list([_SP("S1", "Demo Set", 40, "me", True),
+                      _SP("S2", "Road Trip (sample)", 22, "me", True),
+                      _SP("S3", "Shared Mix (sample)", 31, "friend", False, collaborative=True),
+                      _SP("S4", "Late Night (sample)", 18, "me", True),
+                      _SP("S5", "A Friend's Playlist (sample)", 57, "friend", False)])
+save(w, "80-main-refused-by-spotify", (1440, 900))
+side = w.sp_list.parentWidget()
+side.grab().save(str(OUT / "81-playlist-box-refused-section.png"))
+SAVED.append("81-playlist-box-refused-section.png")
+_bars = {b.objectName(): b for b in w.tool_groups}
+w.removeToolBar(_bars["tools_view"])
+w.insertToolBar(_bars["tools_data"], _bars["tools_view"])
+_bars["tools_view"].show()
+w.insertToolBarBreak(_bars["tools_data"])
+save(w, "82-toolbar-moved-before-restart", (1440, 900))
+w._save_layout()
+w_restarted = MainWindow()
+w_restarted.setAttribute(Qt.WA_DontShowOnScreen, True)
+w_restarted.tracks = sample_tracks()
+w_restarted.current_name = "Demo Set"
+w_restarted.refresh()
+save(w_restarted, "83-toolbar-moved-after-restart", (1440, 900))
+w_restarted.reset_toolbars()
+save(w_restarted, "84-toolbar-after-reset", (1440, 900))
+w_restarted.close()
+w.reset_toolbars()
+
 # ---- Stage 10: FreqBlog's hint while fetching, and the allowance running out ----
 w.busy_on("Looking up 40 track(s)…")
 w._show_hint("12 of 20 tracks are still being analysed. Send them again in about a minute "
