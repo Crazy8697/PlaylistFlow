@@ -6,7 +6,15 @@ The UI is dark but not pure black, so the guidelines call for the white
 monochrome version, never green. Minimum sizes come from the same guidelines:
 the full logo never under 70 px wide, the icon never under 21 px. They mark
 where Spotify content is shown (the playlist list, the playlist header, the
-player, About), never an action button.
+player, About), never an action button. Partner integrations use the full logo
+(icon and wordmark); the icon alone is only for an app icon, so every mark here
+is the full logo.
+
+Spotify metadata and artwork must also link back to Spotify, to the Spotify app
+when it is installed: spotify_link() is that link, worded the way the
+guidelines ask ("OPEN SPOTIFY", or "GET SPOTIFY FREE" when the app isn't there).
+
+Guidelines read 2026-10-17 at https://developer.spotify.com/documentation/design
 """
 
 from __future__ import annotations
@@ -14,15 +22,16 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QPixmap
-from PySide6.QtWidgets import QLabel
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QDesktopServices, QPixmap
+from PySide6.QtWidgets import QLabel, QSizePolicy
 
 FULL_LOGO = "Spotify_Full_Logo_RGB_White.png"
 ICON = "Spotify_Primary_Logo_RGB_White.png"
 FULL_MIN_W = 70
 ICON_MIN = 21
 SPOTIFY_URL = "https://open.spotify.com"
+GET_SPOTIFY_URL = "https://www.spotify.com/download/"
 
 
 def _asset(name: str) -> Path | None:
@@ -78,6 +87,90 @@ def logo_label(full: bool = True, size: int = 84, tip: str = "Content from Spoti
     lab.setPixmap(pm)
     lab.setToolTip(tip)
     if zone and not pm.isNull():
-        m = max(1, round(pm.height() / pm.devicePixelRatio() / 2))
+        m = exclusion_zone(pm)
         lab.setContentsMargins(m, m, m, m)
+    # never squeezed into the clear space by a crowded row: the label is exactly the
+    # logo plus its clear space, and layouts (and so the window's minimum size) have
+    # to make room for that
+    lab.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+    if not pm.isNull():
+        import math
+        m = lab.contentsMargins()
+        lab.setFixedSize(math.ceil(pm.width() / pm.devicePixelRatio()) + m.left() + m.right(),
+                         math.ceil(pm.height() / pm.devicePixelRatio()) + m.top() + m.bottom())
     return lab
+
+
+def exclusion_zone(pm: QPixmap) -> int:
+    """The guidelines' clear space: half the height of the icon. In the full logo
+    the icon is the full height of the lockup, so half the logo's height."""
+    import math
+    return max(1, math.ceil(pm.height() / pm.devicePixelRatio() / 2))
+
+
+# ---------------- linking back to Spotify ----------------
+
+def spotify_installed() -> bool:
+    """Is the Spotify app registered for spotify: links on this PC (per user or for
+    everyone)? Read only, from the Windows registry's URL handlers."""
+    if sys.platform != "win32":
+        return False
+    import winreg
+    for root, path in ((winreg.HKEY_CURRENT_USER, r"Software\Classes\spotify"),
+                       (winreg.HKEY_LOCAL_MACHINE, r"Software\Classes\spotify")):
+        try:
+            with winreg.OpenKey(root, path) as k:
+                winreg.QueryValueEx(k, "URL Protocol")
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def link_text(installed: bool | None = None) -> str:
+    """The guidelines' wording: OPEN SPOTIFY when the app is installed, else GET SPOTIFY FREE."""
+    installed = spotify_installed() if installed is None else installed
+    return "OPEN SPOTIFY" if installed else "GET SPOTIFY FREE"
+
+
+def spotify_target(kind: str, sid: str, installed: bool | None = None) -> str:
+    """Where a link back goes: the item in the Spotify app (spotify:kind:id) when it is
+    installed, else the page that offers the app for free."""
+    installed = spotify_installed() if installed is None else installed
+    if installed and kind and sid:
+        return f"spotify:{kind}:{sid}"
+    return GET_SPOTIFY_URL
+
+
+def open_in_spotify(kind: str, sid: str, opener=None) -> str:
+    """Open a playlist or track in Spotify; returns the address used."""
+    url = spotify_target(kind, sid)
+    (opener or (lambda u: QDesktopServices.openUrl(QUrl(u))))(url)
+    return url
+
+
+def spotify_link(tip: str = "") -> QLabel:
+    """A small text link back to Spotify. Its target is set with set_link_target();
+    it stays hidden until there is something to link to."""
+    lab = QLabel()
+    lab.setObjectName("spotify_link")
+    lab.setTextFormat(Qt.RichText)
+    lab.setTextInteractionFlags(Qt.TextBrowserInteraction)
+    lab.setOpenExternalLinks(False)
+    lab.linkActivated.connect(lambda url: QDesktopServices.openUrl(QUrl(url)))
+    lab.setToolTip(tip)
+    lab.setVisible(False)
+    return lab
+
+
+def set_link_target(lab: QLabel, kind: str, sid: str, installed: bool | None = None) -> None:
+    if not sid:
+        lab.setVisible(False)
+        lab.setProperty("target", "")
+        return
+    installed = spotify_installed() if installed is None else installed
+    target = spotify_target(kind, sid, installed)
+    lab.setProperty("target", target)
+    lab.setText(f"<a href='{target}' style='color:#ffffff;text-decoration:none;"
+                f"font-weight:700;font-size:11px;letter-spacing:1px'>{link_text(installed)}</a>")
+    lab.setVisible(True)

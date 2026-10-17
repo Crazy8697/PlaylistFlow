@@ -34,7 +34,7 @@ from .chart import BarChart
 from .table import TrackTable, COL_BPM, COL_KEY
 from .spinner import Spinner
 from .player import PlayerBar
-from .brand import logo_label, full_logo_pixmap
+from .brand import logo_label, full_logo_pixmap, spotify_link, set_link_target, open_in_spotify
 from . import theme
 from .artwork import about_pixmap, icon_pixmap, remote_pixmap
 from .wheel import KeyWheelDialog
@@ -786,6 +786,9 @@ class MainWindow(QMainWindow):
         spl.addLayout(sp_head)
         self.sp_list = QListWidget()
         self.sp_list.itemDoubleClicked.connect(lambda _: self.load_from_spotify())
+        # every playlist listed links back to itself on Spotify
+        self.sp_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.sp_list.customContextMenuRequested.connect(self._sp_list_menu)
         spl.addWidget(self.sp_list, 1)
         sl.addWidget(sp_box, 1)
 
@@ -846,6 +849,7 @@ class MainWindow(QMainWindow):
         self.table.earCheckToggled.connect(self.toggle_ear_check)
         self.table.edited.connect(self.edit_cell)
         self.table.deleteRequested.connect(self.delete_rows)
+        self.table.openInSpotify.connect(self.open_track_in_spotify)
         self.table.itemSelectionChanged.connect(self._sync_selection)
         # Double-click plays from that row, but BPM and Key use double-click
         # to start editing, so leave those two columns alone.
@@ -878,25 +882,28 @@ class MainWindow(QMainWindow):
         # the button floating in a column of its own beside everything.
         head_row = QHBoxLayout()
         head_row.setSpacing(8)
-        # a playlist of Spotify tracks is Spotify content: the icon attributes it
-        self.pl_spotify = logo_label(full=False, size=22,
+        # A playlist of Spotify tracks is Spotify content: attributed with the full
+        # logo (partner integrations use the full logo, the icon alone is for app
+        # icons), inside its clear space, and linked back to the playlist on Spotify.
+        self.pl_spotify = logo_label(full=True, size=76,
                                      tip="Track names and artwork from Spotify")
+        self.pl_spotify.setObjectName("pl_spotify_logo")
         self.pl_spotify.setVisible(False)
         head_row.addWidget(self.pl_spotify)
-        self.pl_name = QLabel("No playlist open")
-        self.pl_name.setObjectName("plname")
-        head_row.addWidget(self.pl_name)
+        self.pl_name = theme.elided_label("No playlist open", "plname")
+        head_row.addWidget(self.pl_name, 1)
         self.pl_count = QLabel("")
         self.pl_count.setObjectName("plcount")
         head_row.addWidget(self.pl_count)
-        head_row.addStretch(1)
-        self.btn_desc = QPushButton("Save description")
-        self.btn_desc.setToolTip(
-            "Write the description back to the Spotify playlist." "\n"
-            "Saved with the local playlist either way.")
-        self.btn_desc.setObjectName("inline")
-        self.btn_desc.clicked.connect(self.save_description)
-        head_row.addWidget(self.btn_desc)
+        self.pl_open = spotify_link("Open this playlist in Spotify")
+        self.pl_open.setObjectName("pl_open_spotify")
+        head_row.addWidget(self.pl_open)
+        # an icon button beside the description, so the header row has room for the
+        # Spotify logo's clear space at any window size
+        self.btn_desc = self._panel_btn("content-save-outline", "Save description: write it "
+                                        "back to the Spotify playlist. Saved with the local "
+                                        "playlist either way.", self.save_description)
+        self.btn_desc.setObjectName("save_desc")
         meta.addLayout(head_row)
 
         self.pl_desc = QPlainTextEdit()
@@ -905,7 +912,11 @@ class MainWindow(QMainWindow):
         # Expands to fill the strip, so its bottom edge lands exactly level
         # with the cover's -- a fixed height left the cover overhanging the
         # text column and looking cropped.
-        meta.addWidget(self.pl_desc, 1)
+        desc_row = QHBoxLayout()
+        desc_row.setSpacing(6)
+        desc_row.addWidget(self.pl_desc, 1)
+        desc_row.addWidget(self.btn_desc, 0, Qt.AlignTop)
+        meta.addLayout(desc_row, 1)
         il.addLayout(meta, 1)
 
         # Deliberately NOT in the splitter: this is reference material to judge
@@ -1646,6 +1657,25 @@ class MainWindow(QMainWindow):
                 )
             self.sp_list.addItem(it)
         self.status(f"{len(lists)} playlists on your account.")
+
+    def _sp_list_menu(self, pos):
+        it = self.sp_list.itemAt(pos)
+        if it is None:
+            return
+        from PySide6.QtWidgets import QMenu
+        from .brand import link_text
+        m = QMenu(self)
+        a = m.addAction("Load playlist")
+        a.triggered.connect(lambda: (self.sp_list.setCurrentItem(it), self.load_from_spotify()))
+        a = m.addAction(link_text().capitalize().replace("spotify", "Spotify"))
+        a.triggered.connect(lambda: open_in_spotify("playlist", it.data(Qt.UserRole)))
+        m.exec(self.sp_list.viewport().mapToGlobal(pos))
+
+    def open_track_in_spotify(self, row: int):
+        if 0 <= row < len(self.tracks):
+            uri = self.tracks[row].uri or ""
+            if uri.startswith("spotify:track:"):
+                open_in_spotify("track", uri.split(":")[-1])
 
     def load_from_spotify(self):
         it = self.sp_list.currentItem()
@@ -2431,6 +2461,7 @@ class MainWindow(QMainWindow):
             position_ms=st.get("progress_ms") or 0,
             duration_ms=item.get("duration_ms") or 0,
             art_url=art,
+            uri=uri,
         )
 
     def toggle_ear_check(self, row: int):
@@ -2544,8 +2575,11 @@ class MainWindow(QMainWindow):
     def show_playlist_info(self):
         """Refresh the bottom strip from whatever is currently open."""
         self.pl_name.setText(self.current_name or "No playlist open")
+        # the whole name stays readable even when the strip is narrow
+        self.pl_name.setToolTip(self.current_name or "")
         self.pl_spotify.setVisible(bool(self.current_pid) or any(
             (t.uri or "").startswith("spotify:") for t in self.tracks))
+        set_link_target(self.pl_open, "playlist", self.current_pid or "")
         if self.tracks:
             total = sum(t.duration_ms for t in self.tracks if t.duration_ms > 0)
             missing = sum(1 for t in self.tracks if t.duration_ms <= 0)

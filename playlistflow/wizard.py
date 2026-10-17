@@ -181,6 +181,110 @@ def explain_auth_error(e: Exception, uri: str) -> str:
     return f"Sign-in failed: {e}"
 
 
+# ---------------- the agreement (wizard step 3, and on its own at startup) ----------------
+
+def agreement_page(heading: str, lead: str) -> tuple[QWidget, QCheckBox]:
+    """Both documents in tabs and the unticked "I agree" box. Shared by the wizard's
+    agreement step and the startup agreement, so the two can't differ."""
+    w = QWidget()
+    v = QVBoxLayout(w)
+    v.addWidget(_h(heading))
+    v.addWidget(_p(f"<p>{lead} In short: Playlist Flow has no server and collects nothing; your "
+                   "keys, sign-in and playlists stay on this PC.</p>"))
+    tabs = QTabWidget()
+    tabs.setObjectName("agree_tabs")
+    for title, name in (("Privacy policy", "PRIVACY.md"), ("End user agreement", "TERMS.md")):
+        tb = QTextBrowser()
+        tb.setObjectName(f"doc_{name.split('.')[0].lower()}")
+        tb.setOpenExternalLinks(True)
+        tb.setMarkdown(read_doc(name))
+        tabs.addTab(tb, title)
+    v.addWidget(tabs, 1)
+    box = QCheckBox("I have read and agree to the Playlist Flow end user agreement "
+                    "and privacy policy")
+    box.setObjectName("agree_box")
+    v.addWidget(box)
+    return w, box
+
+
+def set_up(env: dict, prefs) -> bool:
+    """Has this user been through setup? Both keys and a stored Spotify sign-in. Read
+    from this PC only, no network: whether the sign-in still works is checked later."""
+    return bool(env.get("SPOTIFY_CLIENT_ID") and env.get("FREQBLOG_API_KEY")
+                and prefs.refresh_token)
+
+
+def startup_agreement_needed(env: dict, prefs) -> bool:
+    """An existing user whose accepted version is missing or older than the current
+    documents. First-time users get the agreement inside the wizard instead."""
+    return set_up(env, prefs) and prefs.agreement_version != AGREEMENT_VERSION
+
+
+class AgreementDialog(QDialog):
+    """The agreement step on its own, for users who are already set up when the
+    documents change. Agree stores the version; Decline (or closing the window) asks
+    the same question the setup wizard does when it is quit: quit Playlist Flow?"""
+
+    def __init__(self, prefs, parent=None):
+        super().__init__(parent)
+        self.prefs = prefs
+        self.setObjectName("startup_agreement")
+        self.setWindowTitle("Playlist Flow")
+        self.setMinimumSize(720, 560)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(22, 18, 22, 14)
+        lab = QLabel("UPDATED  ·  PRIVACY AND TERMS")
+        lab.setStyleSheet(f"color:{theme.ACCENT};font-size:11px;font-weight:700;"
+                          "letter-spacing:1px;background:transparent;")
+        outer.addWidget(lab)
+        page, self.agree_box = agreement_page(
+            "Privacy policy and end user agreement",
+            "These changed since you last accepted them. Please read both, then agree to "
+            "keep using Playlist Flow.")
+        outer.addWidget(page, 1)
+        nav = QHBoxLayout()
+        self.btn_decline = QPushButton("Decline")
+        self.btn_decline.setObjectName("agreement_decline")
+        self.btn_decline.clicked.connect(self.reject)
+        nav.addWidget(self.btn_decline)
+        nav.addStretch(1)
+        self.btn_agree = QPushButton("Agree and continue")
+        self.btn_agree.setObjectName("agreement_agree")
+        self.btn_agree.setDefault(True)
+        self.btn_agree.setEnabled(False)
+        self.btn_agree.clicked.connect(self.accept)
+        self.agree_box.toggled.connect(self.btn_agree.setEnabled)
+        nav.addWidget(self.btn_agree)
+        outer.addLayout(nav)
+        self.quit_confirmed = False
+
+    def accept(self):
+        if not self.agree_box.isChecked():
+            return
+        self.prefs.agreement_version = AGREEMENT_VERSION
+        super().accept()
+
+    def reject(self):
+        ans = QMessageBox.question(
+            self, "Quit Playlist Flow?",
+            "Playlist Flow needs you to accept the updated privacy policy and end user "
+            "agreement before it can work. Quit Playlist Flow now? Nothing is changed, and "
+            "you'll be asked again the next time you open it.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if ans != QMessageBox.Yes:
+            return
+        self.quit_confirmed = True
+        super().reject()
+
+
+def run_startup_agreement(env: dict, prefs, dialog=AgreementDialog) -> bool:
+    """Called once per launch, before the main window. True: carry on (nothing to ask,
+    or agreed). False: declined, so the program quits without changing anything."""
+    if not startup_agreement_needed(env, prefs):
+        return True
+    return dialog(prefs).exec() == QDialog.Accepted
+
+
 # ---------------- the wizard ----------------
 
 def _h(text: str) -> QLabel:
@@ -518,26 +622,10 @@ class SetupWizard(QDialog):
     # ---------------- 3 privacy and terms ----------------
 
     def _agree(self) -> QWidget:
-        w = QWidget()
-        v = QVBoxLayout(w)
-        v.addWidget(_h("Privacy policy and end user agreement"))
-        v.addWidget(_p("<p>Please read both before signing in to Spotify. In short: Playlist Flow "
-                       "has no server and collects nothing; your keys, sign-in and playlists stay "
-                       "on this PC.</p>"))
-        tabs = QTabWidget()
-        tabs.setObjectName("agree_tabs")
-        for title, name in (("Privacy policy", "PRIVACY.md"), ("End user agreement", "TERMS.md")):
-            tb = QTextBrowser()
-            tb.setObjectName(f"doc_{name.split('.')[0].lower()}")
-            tb.setOpenExternalLinks(True)
-            tb.setMarkdown(read_doc(name))
-            tabs.addTab(tb, title)
-        v.addWidget(tabs, 1)
-        self.agree_box = QCheckBox("I have read and agree to the Playlist Flow end user agreement "
-                                   "and privacy policy")
-        self.agree_box.setObjectName("agree_box")
+        w, self.agree_box = agreement_page(
+            "Privacy policy and end user agreement",
+            "Please read both before signing in to Spotify.")
         self.agree_box.toggled.connect(lambda _: self._refresh_next())
-        v.addWidget(self.agree_box)
         return w
 
     # ---------------- 4 sign in ----------------

@@ -112,6 +112,9 @@ w._ensure_storage()
 w.tracks = sample_tracks()
 w.current_name = "Demo Set"
 w.current_desc = "Synthetic sample set for the screenshots."
+w.current_pid = "SYNTHETICPLAYLIST0001"       # shows the header's link back to Spotify
+w.player.set_state(True, "Sample Track 07", "Sample Artist G", 64000, 214000, "",
+                   uri="spotify:track:SYNTHETICTRACK0007")
 w.sp_list.addItems(["Demo Set", "Road Trip (sample)", "Late Night (sample)", "Warmup (sample)"])
 w.refresh_saved() if hasattr(w, "refresh_saved") else None
 w.refresh()
@@ -297,6 +300,21 @@ _name["next"] = "42-end-user-agreement"
 mw.DocDialog("TERMS.md", w).exec()
 _name["next"] = "43-disconnect-spotify"
 mw.DisconnectDialog(w.prefs.storage_dir, w).exec()
+
+# ---- Stage 9: the agreement on its own at startup, for users already set up ----
+w.prefs.agreement_version = "2026-10-17"
+ag = wz.AgreementDialog(w.prefs)
+ag.resize(760, 640)
+save(ag, "50-startup-agreement-unticked")
+ag.agree_box.setChecked(True)
+save(ag, "51-startup-agreement-ticked")
+_name["next"] = "52-startup-agreement-quit-question"
+qb = QMessageBox(QMessageBox.Question, "Quit Playlist Flow?",
+                 "Playlist Flow needs you to accept the updated privacy policy and end user "
+                 "agreement before it can work. Quit Playlist Flow now? Nothing is changed, and "
+                 "you'll be asked again the next time you open it.",
+                 QMessageBox.Yes | QMessageBox.No, ag)
+qb.exec()
 
 print("saved to", OUT)
 for n in SAVED:

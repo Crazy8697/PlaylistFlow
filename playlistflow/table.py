@@ -143,6 +143,7 @@ class TrackTable(QTableWidget):
     reordered = Signal(int, int)        # from_row, to_row
     edited = Signal(int, str, str)      # row, field ("bpm"|"key"), new text
     deleteRequested = Signal(list)      # rows
+    openInSpotify = Signal(int)         # row: the track on Spotify (the link back)
     dragFinished = Signal()             # re-sync the view after Qt's teardown
     playRequested = Signal(int)         # row
     previewRequested = Signal(int)      # row
@@ -209,6 +210,11 @@ class TrackTable(QTableWidget):
                         else "Mark transition into next as ear-checked")
         a.setEnabled(row + 1 < len(self._tracks))
         a.triggered.connect(lambda: self.earCheckToggled.emit(row))
+        m.addSeparator()
+        from .brand import link_text
+        a = m.addAction(link_text().capitalize().replace("spotify", "Spotify"))
+        a.setEnabled((t.uri or "").startswith("spotify:track:"))
+        a.triggered.connect(lambda: self.openInSpotify.emit(row))
         m.addSeparator()
         a = m.addAction("Copy artist - title")
         a.triggered.connect(lambda: self.copyRequested.emit(self._sel_rows(row)))
@@ -320,20 +326,23 @@ class TrackTable(QTableWidget):
         self.setItem(i, COL_N, n_item)
 
         title = mk(t.title)
+        # Spotify's guidelines: truncated metadata must stay viewable in full, so the
+        # whole title leads every tooltip
+        note = ""
         if not t.resolved:
-            title.setToolTip("No BPM/key yet, type them in, or re-run Fetch.")
+            note = "No BPM/key yet, type them in, or re-run Fetch."
         elif t.unverified:
-            title.setToolTip(
-                f"Provisional, scraped from {t.source.split(':', 1)[-1]} via web "
-                f"search, not an audio analysis. Keys from this route matched a "
-                f"known-good reference about 4 times in 10. Check it, then type "
-                f"the value in to lock it."
-            )
+            note = (f"Provisional, scraped from {t.source.split(':', 1)[-1]} via web "
+                    f"search, not an audio analysis. Keys from this route matched a "
+                    f"known-good reference about 4 times in 10. Check it, then type "
+                    f"the value in to lock it.")
         elif t.low_confidence:
-            title.setToolTip("Low-confidence analysis, worth checking against Serato.")
+            note = "Low-confidence analysis, worth checking against Serato."
+        title.setToolTip(t.title + ("\n\n" + note if note else ""))
         self.setItem(i, COL_TITLE, title)
 
         art = mk(t.artist)
+        art.setToolTip(t.artist)
         art.setForeground(DIM)
         self.setItem(i, COL_ARTIST, art)
 

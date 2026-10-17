@@ -48,6 +48,13 @@ def main() -> int:
     app = QApplication(sys.argv)
     setup_app(app)
 
+    # Users who are already set up see changed documents here, once, before the window;
+    # first-time users get them inside the setup wizard instead.
+    from playlistflow.config import Prefs, load_env
+    from playlistflow.wizard import run_startup_agreement
+    if not run_startup_agreement(load_env(), Prefs()):
+        return 0                      # declined: quit, nothing changed
+
     w = MainWindow()
     w.show()
     return app.exec()

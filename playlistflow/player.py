@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 )
 
 from .artwork import remote_pixmap
-from .brand import logo_label
+from .brand import logo_label, spotify_link, set_link_target
 
 PREVIEW_TAIL_DEFAULT = 20      # seconds of the outgoing track
 ART = 44                       # now-playing cover, square
@@ -61,14 +61,17 @@ class PlayerBar(QWidget):
         top.addWidget(self.art)
         self._art_url = ""
 
-        self.now = QLabel("Nothing playing")
-        self.now.setObjectName("now")
-        self.now.setMinimumWidth(180)
+        from .theme import elided_label
+        self.now = elided_label("Nothing playing", "now")
         top.addWidget(self.now, 1)
 
         # what plays here is Spotify content: attributed with the full logo
         self.spotify_logo = logo_label(full=True, size=78, tip="Playback on Spotify")
         top.addWidget(self.spotify_logo)
+        # the playing track links back to itself on Spotify
+        self.open_link = spotify_link("Open what's playing in Spotify")
+        self.open_link.setObjectName("player_open_spotify")
+        top.addWidget(self.open_link)
 
         self.btn_prev = QPushButton("◀◀")
         self.btn_prev.setFixedWidth(44)
@@ -145,10 +148,14 @@ class PlayerBar(QWidget):
             self.art.clear()
 
     def set_state(self, playing: bool, title: str, artist: str,
-                  position_ms: int, duration_ms: int, art_url: str = ""):
+                  position_ms: int, duration_ms: int, art_url: str = "", uri: str = ""):
         self.set_art(art_url)
         self.btn_play.setText("❚❚" if playing else "▶")
         self.now.setText(f"{title}, {artist}" if title else "Nothing playing")
+        if uri != getattr(self, "_uri", None):
+            self._uri = uri
+            set_link_target(self.open_link, "track",
+                            uri.split(":")[-1] if uri.startswith("spotify:track:") else "")
         self._duration = duration_ms
         self.pos.setText(ms_to_clock(position_ms))
         self.dur.setText(ms_to_clock(duration_ms))
@@ -158,6 +165,8 @@ class PlayerBar(QWidget):
 
     def set_offline(self, msg: str = "Spotify not running"):
         self.set_art("")
+        self._uri = ""
+        set_link_target(self.open_link, "track", "")
         self.btn_play.setText("▶")
         self.now.setText(msg)
         self.pos.setText("0:00")

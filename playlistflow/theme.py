@@ -226,3 +226,45 @@ def icon(name: str, active_ink: bool = True):
     if active_ink:
         kw["color_on"] = ACCENT_INK
     return _iconic().icon("mdi6." + name, **kw)
+
+
+def elided_label(text: str = "", name: str = ""):
+    """A QLabel that shortens its text with an ellipsis instead of clipping it, and
+    keeps the whole text in its tooltip (Spotify's guidelines: truncated metadata must
+    stay viewable in full)."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QLabel, QSizePolicy
+
+    class _Elided(QLabel):
+        def __init__(self):
+            super().__init__()
+            self._full = ""
+            self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+            self.setMinimumWidth(40)
+
+        def setText(self, t):                       # noqa: N802 (Qt name)
+            self._full = t or ""
+            self.setToolTip(self._full)
+            self._fit()
+
+        def text(self):
+            return self._full
+
+        def _fit(self):
+            fm = self.fontMetrics()
+            super().setText(fm.elidedText(self._full, Qt.ElideRight, max(0, self.width())))
+
+        def resizeEvent(self, e):
+            super().resizeEvent(e)
+            self._fit()
+
+        def sizeHint(self):
+            sh = super().sizeHint()
+            sh.setWidth(self.fontMetrics().horizontalAdvance(self._full) + 4)
+            return sh
+
+    lab = _Elided()
+    if name:
+        lab.setObjectName(name)
+    lab.setText(text)
+    return lab
